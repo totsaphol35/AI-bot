@@ -1,120 +1,30 @@
+import os
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
-from apscheduler.schedulers.background import BackgroundScheduler
+import yfinance as pd_yf # หรือใช้ import yfinance as yf ตามโครงสร้างเดิมของคุณ
 import yfinance as yf
-import time
-
-# 1. กุญแจเชื่อมต่อ LINE ของคุณ
-line_bot_api = LineBotApi('rVox1ZVmb9g80PwUN57oDVyyQly2U8tK5nBxAVKDaPQobE7CL5EmF55W7xqrXg4jVANeMFWX2iEo3aGAgG5mlw/L0WjWNwo9+4gR+NZDuiXaDKwaBQMyY0FJre9qac45v67+xWYnKQzPRXAMHHvnPgdB04t89/1O/w1cDnyilFU=')
-handler = WebhookHandler('20ccc2eef396b3f3b54488d43242c4b4')
-
-# 2. User ID สำหรับรับแจ้งเตือนอัตโนมัติ
-MY_USER_ID = "U639be0a84fff17471b4228805a517df3"
-
-# 3. รายชื่อหุ้น/ทองคำ ที่ต้องการให้บอตเฝ้าแนวรับ-แนวต้านอัตโนมัติ (เพิ่ม-ลดได้เอง)
-# หมายเหตุ: หุ้นไทยให้เติม .BK ต่อท้าย, ทองคำใช้ GC=F
-WATCHLIST = ["QQQM", "PTT.BK", "AOT.BK", "GC=F"]
-
-# ตัวแปรเก็บเวลาแจ้งเตือนล่าสุด (ป้องกันบอตส่งข้อความรัวซ้ำๆ)
-last_alert_time = {}
+import pandas as pd
 
 app = Flask(__name__)
 
-# ฟังก์ชันดึงข้อมูลและคำนวณแนวรับ-แนวต้าน
-def analyze_stock(raw_ticker):
-    symbol = raw_ticker.strip().upper()
-    
-    # แปลงคำค้นหาทองคำให้ตรงกับระบบ Yahoo Finance
-    if symbol in ["XAUUSD", "GOLD", "ทอง"]:
-        symbol = "GC=F"
+# กำหนด Token และ Secret ของ LINE OA (ดึงจาก Environment Variables บน Render เพื่อความปลอดภัย)
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "YOUR_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "YOUR_CHANNEL_SECRET")
 
-    # ลองดึงข้อมูลตรงๆ ก่อน (รองรับหุ้นนอกอย่าง QQQM, NVDA, AAPL)
-    stock = yf.Ticker(symbol)
-    hist = stock.history(period="1mo")
-    currency = "USD"
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-    # ถ้าไม่เจอ และยังไม่มี .BK ให้ลองเติม .BK เพื่อค้นหาในตลาดหุ้นไทย
-    if hist.empty and not symbol.endswith(".BK") and symbol != "GC=F":
-        symbol = f"{symbol}.BK"
-        stock = yf.Ticker(symbol)
-        hist = stock.history(period="1mo")
-        currency = "บาท"
-    elif symbol.endswith(".BK"):
-        currency = "บาท"
-
-    if hist.empty:
-        return None
-
-    # คำนวณราคาปิดล่าสุด และแนวรับ-แนวต้านจากจุดต่ำสุด/สูงสุดในรอบ 20 แท่ง
-    last_price = round(hist['Close'].iloc[-1], 2)
-    support = round(hist['Low'].tail(20).min(), 2)
-    resistance = round(hist['High'].tail(20).max(), 2)
-
-    return {
-        "symbol": symbol,
-        "price": last_price,
-        "support": support,
-        "resistance": resistance,
-        "currency": currency
-    }
-
-# ฟังก์ชันเฝ้าราคาอัตโนมัติ (ทำงานทุกๆ 5 นาที)
-def check_price_alerts():
-    current_time = time.time()
-    
-    for sym in WATCHLIST:
-        try:
-            data = analyze_stock(sym)
-            if not data:
-                continue
-
-            price = data["price"]
-            sup = data["support"]
-            res = data["resistance"]
-            curr = data["currency"]
-            
-            # เช็กว่าเพิ่งแจ้งเตือนหุ้นตัวนี้ไปภายใน 1 ชั่วโมง (3600 วินาที) หรือไม่
-            if sym in last_alert_time and (current_time - last_alert_time[sym] < 3600):
-                continue
-
-            # เงื่อนไขแจ้งเตือน: ราคาเข้าใกล้แนวรับไม่เกิน 1%
-            if price <= sup * 1.01:
-                msg = (
-                    f"🟢 แจ้งเตือนเข้าใกล้แนวรับ!\n"
-                    f"สินทรัพย์: {data['symbol']}\n"
-                    f"ราคาล่าสุด: {price} {curr}\n"
-                    f"แนวรับสำคัญ: {sup} {curr}\n"
-                    f"แนวต้านถัดไป: {res} {curr}"
-                )
-                line_bot_api.push_message(MY_USER_ID, TextSendMessage(text=msg))
-                last_alert_time[sym] = current_time
-
-            # เงื่อนไขแจ้งเตือน: ราคาเข้าใกล้แนวต้านไม่เกิน 1%
-            elif price >= res * 0.99:
-                msg = (
-                    f"🔴 แจ้งเตือนเข้าใกล้แนวต้าน!\n"
-                    f"สินทรัพย์: {data['symbol']}\n"
-                    f"ราคาล่าสุด: {price} {curr}\n"
-                    f"แนวต้านสำคัญ: {res} {curr}\n"
-                    f"แนวรับถัดไป: {sup} {curr}"
-                )
-                line_bot_api.push_message(MY_USER_ID, TextSendMessage(text=msg))
-                last_alert_time[sym] = current_time
-                
-        except Exception as e:
-            print(f"Error checking {sym}: {e}")
-
-# ตั้งเวลาให้เช็กราคาอัตโนมัติทุกๆ 5 นาที
-scheduler = BackgroundScheduler()
-scheduler.add_job(func=check_price_alerts, trigger="interval", minutes=5)
-scheduler.start()
+@app.route("/")
+def home():
+    return "Totsaphol ผู้หยั่งรู้หุ้น Server is running!"
 
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
+    app.logger.info("Request body: " + body)
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
@@ -123,23 +33,85 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    ticker = event.message.text
-    
+    text = event.message.text.strip().upper()
+    raw_text = event.message.text.strip()
+    reply_text = ""
+
     try:
-        data = analyze_stock(ticker)
-        
-        if not data:
-            reply_text = f"❌ ไม่พบข้อมูล {ticker.upper()} หรือพิมพ์สัญลักษณ์ผิดครับ"
-        else:
+        # 1. คำสั่งช่วยเหลือ (/HELP หรือ เมนู)
+        if text in ["/HELP", "เมนู", "คำสั่ง"]:
             reply_text = (
-                f"📊 ข้อมูล {data['symbol']}\n"
-                f"ราคาล่าสุด: {data['price']} {data['currency']}\n"
-                f"🟢 แนวรับ (20D): {data['support']} {data['currency']}\n"
-                f"🔴 แนวต้าน (20D): {data['resistance']} {data['currency']}"
+                "🤖 คู่มือการใช้งาน Totsaphol ผู้หยั่งรู้หุ้น:\n\n"
+                "1. พิมพ์ชื่อย่อหุ้น/ทอง เช่น QQQM, GC=F, AOT.BK เพื่อดูราคาและแนวรับแนวต้าน\n"
+                "2. พิมพ์ /SUMMARY เพื่อดูสรุปราคาสินทรัพย์ยอดฮิต\n"
+                "3. พิมพ์ /TECH [ชื่อหุ้น] เพื่อดูอินดิเคเตอร์ทางเทคนิค (เช่น /TECH AAPL)\n"
+                "4. พิมพ์ RSI เพื่อดูค่า RSI เบื้องต้น"
             )
+
+        # 2. คำสั่งสรุปภาพรวมตลาด (/SUMMARY)
+        elif text in ["/SUMMARY", "!MARKET", "สรุปตลาด"]:
+            symbols = ["GC=F", "QQQM", "AAPL", "AOT.BK"]
+            reply_text = "📊 สรุปภาพรวมตลาดวันนี้:\n"
+            for sym in symbols:
+                try:
+                    stock = yf.Ticker(sym)
+                    df = stock.history(period="1d")
+                    if not df.empty:
+                        price = df['Close'].iloc[-1]
+                        reply_text += f"- {sym}: {price:.2f}\n"
+                except:
+                    pass
+
+        # 3. คำสั่งวิเคราะห์เทคนิคเจาะลึก (/TECH [SYMBOL])
+        elif text.startswith("/TECH "):
+            parts = raw_text.split(" ")
+            if len(parts) > 1:
+                sym = parts[1].upper()
+                try:
+                    stock = yf.Ticker(sym)
+                    df = stock.history(period="60d")
+                    if not df.empty:
+                        current_price = df['Close'].iloc[-1]
+                        ema_20 = df['Close'].ewm(span=20).mean().iloc[-1]
+                        support = df['Low'].tail(20).min()
+                        resistance = df['High'].tail(20).max()
+                        
+                        reply_text = (
+                            f"📈 วิเคราะห์เทคนิค {sym}\n"
+                            f"• ราคาปัจจุบัน: {current_price:.2f}\n"
+                            f"• EMA 20: {ema_20:.2f}\n"
+                            f"• แนวรับ (20 วัน): {support:.2f}\n"
+                            f"• แนวต้าน (20 วัน): {resistance:.2f}"
+                        )
+                    else:
+                        reply_text = f"ไม่พบข้อมูลของสินทรัพย์ {sym}"
+                except Exception as e:
+                    reply_text = f"เกิดข้อผิดพลาดในการดึงข้อมูล {sym}"
+
+        # 4. คำสั่งดึงราคาหุ้น / ทองคำรายตัวแบบเดิม (เช่น QQQM, XAUUSD, AOT.BK, RSI)
+        else:
+            # แปลง XAUUSD เป็น GC=F อัตโนมัติ
+            target_symbol = "GC=F" if text == "XAUUSD" else text
             
+            stock = yf.Ticker(target_symbol)
+            df = stock.history(period="30d")
+            
+            if not df.empty:
+                current_price = df['Close'].iloc[-1]
+                support = df['Low'].tail(20).min()
+                resistance = df['High'].tail(20).max()
+                
+                reply_text = (
+                    f"📊 ข้อมูล {target_symbol}\n"
+                    f"ราคาร่าสุด: {current_price:.2f} USD\n"
+                    f"🟢 แนวรับ (20D): {support:.2f} USD\n"
+                    f"🔴 แนวต้าน (20D): {resistance:.2f} USD"
+                )
+            else:
+                reply_text = f"ไม่พบข้อมูลสำหรับ '{target_symbol' กรุณาตรวจสอบชื่อย่อใหม่อีกครั้งครับ"
+
     except Exception as e:
-        reply_text = "⚠️ ขออภัย เกิดข้อผิดพลาดในการดึงข้อมูลครับ"
+        reply_text = "ขออภัยครับ เกิดข้อผิดพลาดในการดึงข้อมูลจากระบบ"
 
     line_bot_api.reply_message(
         event.reply_token,
@@ -147,4 +119,5 @@ def handle_message(event):
     )
 
 if __name__ == "__main__":
-    app.run(port=5000)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
