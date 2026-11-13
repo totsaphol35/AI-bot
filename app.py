@@ -8,7 +8,6 @@ import pandas as pd
 
 app = Flask(__name__)
 
-# กำหนด Token และ Secret ของ LINE OA (ดึงจาก Environment Variables บน Render เพื่อความปลอดภัย)
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "YOUR_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "YOUR_CHANNEL_SECRET")
 
@@ -32,23 +31,23 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    text = event.message.text.strip().upper()
     raw_text = event.message.text.strip()
+    text = raw_text.upper()
     reply_text = ""
 
     try:
         # 1. คำสั่งช่วยเหลือ (/HELP หรือ เมนู)
-        if text in ["/HELP", "เมนู", "คำสั่ง"]:
+        if text in ["/HELP", "HELP", "เมนู", "คำสั่ง"]:
             reply_text = (
                 "🤖 คู่มือการใช้งาน Totsaphol ผู้หยั่งรู้หุ้น:\n\n"
                 "1. พิมพ์ชื่อย่อหุ้น/ทอง เช่น QQQM, GC=F, AOT.BK เพื่อดูราคาและแนวรับแนวต้าน\n"
-                "2. พิมพ์ /SUMMARY เพื่อดูสรุปราคาสินทรัพย์ยอดฮิต\n"
-                "3. พิมพ์ /TECH [ชื่อหุ้น] เพื่อดูอินดิเคเตอร์ทางเทคนิค (เช่น /TECH AAPL)\n"
+                "2. พิมพ์ /summary หรือ summary เพื่อดูสรุปราคาสินทรัพย์ยอดฮิต\n"
+                "3. พิมพ์ /tech [ชื่อหุ้น] เพื่อดูอินดิเคเตอร์ทางเทคนิค (เช่น /tech AAPL)\n"
                 "4. พิมพ์ RSI เพื่อดูค่า RSI เบื้องต้น"
             )
 
         # 2. คำสั่งสรุปภาพรวมตลาด (/SUMMARY)
-        elif text in ["/SUMMARY", "!MARKET", "สรุปตลาด"]:
+        elif text in ["/SUMMARY", "SUMMARY", "!MARKET", "สรุปตลาด"]:
             symbols = ["GC=F", "QQQM", "AAPL", "AOT.BK"]
             reply_text = "📊 สรุปภาพรวมตลาดวันนี้:\n"
             for sym in symbols:
@@ -62,7 +61,7 @@ def handle_message(event):
                     pass
 
         # 3. คำสั่งวิเคราะห์เทคนิคเจาะลึก (/TECH [SYMBOL])
-        elif text.startswith("/TECH "):
+        elif text.startswith("/TECH ") or text.startswith("TECH "):
             parts = raw_text.split(" ")
             if len(parts) > 1:
                 sym = parts[1].upper()
@@ -86,10 +85,15 @@ def handle_message(event):
                         reply_text = f"ไม่พบข้อมูลของสินทรัพย์ {sym}"
                 except Exception as e:
                     reply_text = f"เกิดข้อผิดพลาดในการดึงข้อมูล {sym}"
+            else:
+                reply_text = "กรุณาระบุชื่อหุ้นหลังคำสั่ง เช่น /tech AAPL"
 
-        # 4. คำสั่งดึงราคาหุ้น / ทองคำรายตัวแบบเดิม (เช่น QQQM, XAUUSD, AOT.BK, RSI)
+        # 4. หากพิมพ์ขึ้นต้นด้วย / แต่ไม่ตรงกับคำสั่งใดๆ
+        elif raw_text.startswith("/"):
+            reply_text = f"❌ ไม่พบคำสั่ง '{raw_text}'\nกรุณาพิมพ์ /help เพื่อดูรายการคำสั่งทั้งหมดครับ"
+
+        # 5. คำสั่งดึงราคาหุ้น / ทองคำรายตัวแบบเดิม
         else:
-            # แปลง XAUUSD เป็น GC=F อัตโนมัติ
             target_symbol = "GC=F" if text == "XAUUSD" else text
             
             stock = yf.Ticker(target_symbol)
