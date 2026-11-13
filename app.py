@@ -3,7 +3,6 @@ from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
-import yfinance as pd_yf # หรือใช้ import yfinance as yf ตามโครงสร้างเดิมของคุณ
 import yfinance as yf
 import pandas as pd
 
@@ -108,7 +107,7 @@ def handle_message(event):
                     f"🔴 แนวต้าน (20D): {resistance:.2f} USD"
                 )
             else:
-                reply_text = f"ไม่พบข้อมูลสำหรับ '{target_symbol' กรุณาตรวจสอบชื่อย่อใหม่อีกครั้งครับ"
+                reply_text = f"ไม่พบข้อมูลสำหรับ '{target_symbol}' กรุณาตรวจสอบชื่อย่อใหม่อีกครั้งครับ"
 
     except Exception as e:
         reply_text = "ขออภัยครับ เกิดข้อผิดพลาดในการดึงข้อมูลจากระบบ"
