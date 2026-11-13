@@ -36,20 +36,19 @@ def handle_message(event):
     reply_text = ""
 
     try:
-        # 1. คำสั่งช่วยเหลือ (/HELP หรือ เมนู)
+        # 1. คำสั่งช่วยเหลือ / คู่มือการใช้งาน
         if text in ["/HELP", "HELP", "เมนู", "คำสั่ง"]:
             reply_text = (
                 "🤖 คู่มือการใช้งาน Totsaphol ผู้หยั่งรู้หุ้น:\n\n"
-                "1. พิมพ์ชื่อย่อหุ้น/ทอง เช่น QQQM, GC=F, AOT.BK เพื่อดูราคาและแนวรับแนวต้าน\n"
-                "2. พิมพ์ /summary หรือ summary เพื่อดูสรุปราคาสินทรัพย์ยอดฮิต\n"
-                "3. พิมพ์ /tech [ชื่อหุ้น] เพื่อดูอินดิเคเตอร์ทางเทคนิค (เช่น /tech AAPL)\n"
-                "4. พิมพ์ RSI เพื่อดูค่า RSI เบื้องต้น"
+                "• พิมพ์ชื่อย่อหุ้น/ทอง เช่น QQQM, GC=F, PTT.BK เพื่อดูราคา แนวรับ และแนวต้าน\n"
+                "• พิมพ์ XAUUSD เพื่อเช็คราคาทองคำ\n"
+                "• พิมพ์ /summary เพื่อดูสรุปภาพรวมตลาด"
             )
 
-        # 2. คำสั่งสรุปภาพรวมตลาด (/SUMMARY)
-        elif text in ["/SUMMARY", "SUMMARY", "!MARKET", "สรุปตลาด"]:
-            symbols = ["GC=F", "QQQM", "AAPL", "AOT.BK"]
-            reply_text = "📊 สรุปภาพรวมตลาดวันนี้:\n"
+        # 2. คำสั่งสรุปภาพรวมตลาด
+        elif text in ["/SUMMARY", "SUMMARY", "สรุปตลาด"]:
+            symbols = ["GC=F", "QQQM", "AAPL", "PTT.BK"]
+            reply_text = "📊 สรุปภาพรวมตลาด:\n"
             for sym in symbols:
                 try:
                     stock = yf.Ticker(sym)
@@ -60,41 +59,9 @@ def handle_message(event):
                 except:
                     pass
 
-        # 3. คำสั่งวิเคราะห์เทคนิคเจาะลึก (/TECH [SYMBOL])
-        elif text.startswith("/TECH ") or text.startswith("TECH "):
-            parts = raw_text.split(" ")
-            if len(parts) > 1:
-                sym = parts[1].upper()
-                try:
-                    stock = yf.Ticker(sym)
-                    df = stock.history(period="60d")
-                    if not df.empty:
-                        current_price = df['Close'].iloc[-1]
-                        ema_20 = df['Close'].ewm(span=20).mean().iloc[-1]
-                        support = df['Low'].tail(20).min()
-                        resistance = df['High'].tail(20).max()
-                        
-                        reply_text = (
-                            f"📈 วิเคราะห์เทคนิค {sym}\n"
-                            f"• ราคาปัจจุบัน: {current_price:.2f}\n"
-                            f"• EMA 20: {ema_20:.2f}\n"
-                            f"• แนวรับ (20 วัน): {support:.2f}\n"
-                            f"• แนวต้าน (20 วัน): {resistance:.2f}"
-                        )
-                    else:
-                        reply_text = f"ไม่พบข้อมูลของสินทรัพย์ {sym}"
-                except Exception as e:
-                    reply_text = f"เกิดข้อผิดพลาดในการดึงข้อมูล {sym}"
-            else:
-                reply_text = "กรุณาระบุชื่อหุ้นหลังคำสั่ง เช่น /tech AAPL"
-
-        # 4. หากพิมพ์ขึ้นต้นด้วย / แต่ไม่ตรงกับคำสั่งใดๆ
-        elif raw_text.startswith("/"):
-            reply_text = f"❌ ไม่พบคำสั่ง '{raw_text}'\nกรุณาพิมพ์ /help เพื่อดูรายการคำสั่งทั้งหมดครับ"
-
-        # 5. คำสั่งดึงราคาหุ้น / ทองคำรายตัวแบบเดิม
+        # 3. กรณีพิมพ์ถามหุ้นหรือทองคำรายตัว (เช่น QQQM, PTT.BK, XAUUSD)
         else:
-            target_symbol = "GC=F" if text == "XAUUSD" else text
+            target_symbol = "GC=F" if text == "XAUUSD" else raw_text
             
             stock = yf.Ticker(target_symbol)
             df = stock.history(period="30d")
@@ -104,14 +71,17 @@ def handle_message(event):
                 support = df['Low'].tail(20).min()
                 resistance = df['High'].tail(20).max()
                 
+                # ตรวจสอบว่าเป็นสกุลเงินบาทหรือดอลลาร์
+                currency_unit = "บาท" if ".BK" in target_symbol.upper() else "USD"
+                
                 reply_text = (
-                    f"📊 ข้อมูล {target_symbol}\n"
-                    f"ราคาร่าสุด: {current_price:.2f} USD\n"
-                    f"🟢 แนวรับ (20D): {support:.2f} USD\n"
-                    f"🔴 แนวต้าน (20D): {resistance:.2f} USD"
+                    f"📊 ข้อมูล {target_symbol.upper()}\n"
+                    f"ราคาร่าสุด: {current_price:.2f} {currency_unit}\n"
+                    f"🟢 แนวรับ (20D): {support:.2f} {currency_unit}\n"
+                    f"🔴 แนวต้าน (20D): {resistance:.2f} {currency_unit}"
                 )
             else:
-                reply_text = f"ไม่พบข้อมูลสำหรับ '{target_symbol}' กรุณาตรวจสอบชื่อย่อใหม่อีกครั้งครับ"
+                reply_text = f"❌ ไม่พบข้อมูลสำหรับ '{raw_text}' กรุณาตรวจสอบชื่อย่อใหม่อีกครั้งครับ"
 
     except Exception as e:
         reply_text = "ขออภัยครับ เกิดข้อผิดพลาดในการดึงข้อมูลจากระบบ"
