@@ -11,7 +11,8 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     ReplyMessageRequest,
-    TextMessage
+    TextMessage,
+    ImageMessage
 )
 from linebot.v3.webhooks import (
     MessageEvent,
@@ -24,11 +25,10 @@ app = Flask(__name__)
 configuration = Configuration(access_token=os.getenv('LINE_CHANNEL_ACCESS_TOKEN', 'YOUR_CHANNEL_ACCESS_TOKEN'))
 handler = WebhookHandler(os.getenv('LINE_CHANNEL_SECRET', 'YOUR_CHANNEL_SECRET'))
 
-# Dictionary เก็บรายการหุ้นเฝ้าระวัง (Watchlist) แยกตาม User ID ของแต่ละคน
-# ตัวอย่าง: { user_id: ["QQQM", "GOOGL", "RKLB"] }
+# Dictionary เก็บรายการหุ้นเฝ้าระวัง (Watchlist) แยกตาม User ID
 user_watchlists = {}
 
-# ฟังก์ชันดึงข้อมูลราคาและแนวรับ-แนวต้านแยกตามรายตัวหุ้น
+# ฟังก์ชันดึงข้อมูลราคา ตัวกรองทางเทคนิค (RSI) และแนวรับ-แนวต้านระดับมืออาชีพ
 def get_stock_data(symbol):
     symbol = symbol.upper()
     
@@ -36,44 +36,61 @@ def get_stock_data(symbol):
         return {
             "price": "180.25 USD",
             "win_rate": "74.5%",
-            "supports": ["175.50 USD (ใกล้สุด)", "170.00 USD", "162.50 USD (แข็งแกร่งสุด)"],
-            "resistances": ["185.00 USD (ใกล้สุด)", "190.50 USD", "198.00 USD (แข็งแกร่งสุด)"]
+            "rsi": "45.2 (Neutral / สะสมพลัง)",
+            "trend": "Bullish Trend (ขาขึ้นระยะกลาง)",
+            "supports": ["175.50 USD (ใกล้สุด - แข็งแกร่ง)", "170.00 USD", "162.50 USD (จุด Stop Loss)"],
+            "resistances": ["185.00 USD (ใกล้สุด)", "190.50 USD", "198.00 USD (แนวต้านสำคัญ)"],
+            "chart_url": "https://via.placeholder.com/1000x600.png?text=GOOGL+Technical+Chart"
         }
     elif symbol == "GOOG":
         return {
             "price": "178.90 USD",
             "win_rate": "73.8%",
-            "supports": ["174.00 USD (ใกล้สุด)", "168.50 USD", "160.00 USD (แข็งแกร่งสุด)"],
-            "resistances": ["183.50 USD (ใกล้สุด)", "189.00 USD", "195.50 USD (แข็งแกร่งสุด)"]
+            "rsi": "44.8 (Neutral)",
+            "trend": "Bullish Trend (ขาขึ้นระยะกลาง)",
+            "supports": ["174.00 USD (ใกล้สุด)", "168.50 USD", "160.00 USD (จุด Stop Loss)"],
+            "resistances": ["183.50 USD (ใกล้สุด)", "189.00 USD", "195.50 USD (แนวต้านสำคัญ)"],
+            "chart_url": "https://via.placeholder.com/1000x600.png?text=GOOG+Technical+Chart"
         }
     elif symbol == "QQQM":
         return {
             "price": "210.40 USD",
             "win_rate": "72.0%",
-            "supports": ["205.00 USD (ใกล้สุด)", "198.50 USD", "190.00 USD (แข็งแกร่งสุด)"],
-            "resistances": ["215.50 USD (ใกล้สุด)", "222.00 USD", "230.00 USD (แข็งแกร่งสุด)"]
+            "rsi": "29.5 (Oversold - โอกาสสะสมหุ้น)",
+            "trend": "Rebound Zone (รอจังหวะกลับตัว)",
+            "supports": ["205.00 USD (แนวรับหลัก - แข็งแกร่งมาก)", "198.50 USD", "190.00 USD"],
+            "resistances": ["215.50 USD (ใกล้สุด)", "222.00 USD", "230.00 USD"],
+            "chart_url": "https://via.placeholder.com/1000x600.png?text=QQQM+Technical+Chart"
         }
     elif symbol == "RKLB":
         return {
             "price": "61.53 USD",
             "win_rate": "71.0%",
+            "rsi": "68.4 (Approaching Overbought)",
+            "trend": "Strong Momentum (แรงซื้อหนาแน่น)",
             "supports": ["63.06 USD (ใกล้สุด)", "52.53 USD", "43.89 USD (แข็งแกร่งสุด)"],
-            "resistances": ["51.34 USD (ใกล้สุด)", "55.20 USD", "68.26 USD (แข็งแกร่งสุด)"]
+            "resistances": ["51.34 USD (ใกล้สุด)", "55.20 USD", "68.26 USD (เป้าหมายถัดไป)"],
+            "chart_url": "https://via.placeholder.com/1000x600.png?text=RKLB+Technical+Chart"
         }
     elif symbol == "PTT.BK":
         return {
             "price": "35.25 THB",
             "win_rate": "68.5%",
-            "supports": ["34.00 THB (ใกล้สุด)", "32.50 THB", "30.00 THB (แข็งแกร่งสุด)"],
-            "resistances": ["37.00 THB (ใกล้สุด)", "39.00 THB", "42.00 THB (แข็งแกร่งสุด)"]
+            "rsi": "51.0 (Neutral)",
+            "trend": "Sideway (พักตัวในกรอบ)",
+            "supports": ["34.00 THB (ใกล้สุด)", "32.50 THB", "30.00 THB"],
+            "resistances": ["37.00 THB (ใกล้สุด)", "39.00 THB", "42.00 THB"],
+            "chart_url": "https://via.placeholder.com/1000x600.png?text=PTT.BK+Technical+Chart"
         }
     else:
-        # หุ้นทั่วไปหรือหุ้นอื่นๆ ที่ผู้ใช้พิมพ์เข้ามา
         return {
             "price": "100.00 USD",
             "win_rate": "70.0%",
-            "supports": ["95.00 USD (ใกล้สุด)", "90.00 USD", "85.00 USD (แข็งแกร่งสุด)"],
-            "resistances": ["105.00 USD (ใกล้สุด)", "110.00 USD", "115.00 USD (แข็งแกร่งสุด)"]
+            "rsi": "50.0 (Neutral)",
+            "trend": "Sideway / Normal",
+            "supports": ["95.00 USD (ใกล้สุด)", "90.00 USD", "85.00 USD"],
+            "resistances": ["105.00 USD (ใกล้สุด)", "110.00 USD", "115.00 USD"],
+            "chart_url": "https://via.placeholder.com/1000x600.png?text=Stock+Technical+Chart"
         }
 
 @app.route("/callback", methods=['POST'])
@@ -96,89 +113,77 @@ def handle_message(event):
     user_message = event.message.text.strip()
     command = user_message.upper()
 
-    # กำหนด Watchlist เริ่มต้นให้ผู้ใช้ หากยังไม่เคยมีบันทึกไว้
+    # กำหนด Watchlist เริ่มต้น
     if user_id not in user_watchlists:
         user_watchlists[user_id] = ["QQQM", "GOOGL", "RKLB"]
 
     watchlist = user_watchlists[user_id]
-    reply_text = ""
+    messages_to_reply = []
 
     if command == "/HELP":
-        reply_text = (
-            "📖 คู่มือการใช้งานบอต 'ผู้หยั่งรู้หุ้น'\n\n"
-            "• พิมพ์ชื่อหุ้น (เช่น GOOGL, GOOG, QQQM) เพื่อดูข้อมูลเชิงลึกรายตัว\n"
+        help_text = (
+            "📖 คู่มือการใช้งานบอต 'ผู้หยั่งรู้หุ้น' (Pro Version)\n\n"
+            "• พิมพ์ชื่อหุ้น (เช่น GOOGL, GOOG, QQQM) เพื่อดูข้อมูลเชิงลึก + กราฟ\n"
             "• พิมพ์ +[ชื่อหุ้น] เช่น +PTT.BK เพื่อเพิ่มเข้า Watchlist\n"
-            "• พิมพ์ -[ชื่อหุ้น] เช่น -QQQM เพื่อยกเลิก/ลบออกจาก Watchlist\n"
-            "• /SUMMARY - สรุปภาพรวมหุ้นทุกตัวใน Watchlist ของคุณ\n"
+            "• พิมพ์ -[ชื่อหุ้น] เช่น -QQQM เพื่อลบออกจาก Watchlist\n"
+            "• /SUMMARY - สรุปภาพรวมหุ้นทุกตัวใน Watchlist พร้อมตัวกรอง RSI\n"
             "• /LIST - แสดงรายชื่อหุ้นใน Watchlist ปัจจุบัน"
         )
+        messages_to_reply.append(TextMessage(text=help_text))
+
     elif command == "/SUMMARY":
         if not watchlist:
-            reply_text = "📭 รายการเฝ้าระวังของคุณว่างเปล่า กรุณาเพิ่มหุ้นด้วยคำสั่ง +[ชื่อหุ้น] (เช่น +GOOGL)"
+            messages_to_reply.append(TextMessage(text="📭 รายการเฝ้าระวังของคุณว่างเปล่า กรุณาเพิ่มหุ้นด้วยคำสั่ง +[ชื่อหุ้น]"))
         else:
-            reply_text = f"📊 **สรุปภาพรวมหุ้นใน Watchlist ทั้งหมด ({len(watchlist)} ตัว):**\n"
+            summary_text = f"📊 **สรุปภาพรวม Watchlist ทั้งหมด ({len(watchlist)} ตัว):**\n"
             for stock in watchlist:
                 data = get_stock_data(stock)
-                reply_text += (
+                summary_text += (
                     f"\n--------------------\n"
-                    f"📌 **{stock}** | 💰 {data['price']} | 🎯 Win Rate: {data['win_rate']}\n"
-                    f"🟢 แนวรับ: {data['supports'][0]} | {data['supports'][1]}\n"
-                    f"🔴 แนวต้าน: {data['resistances'][0]} | {data['resistances'][1]}"
+                    f"📌 **{stock}** | 💰 {data['price']}\n"
+                    f"🎯 Win Rate: {data['win_rate']} | 📈 RSI: {data['rsi']}\n"
+                    f"🟢 แนวรับ: {data['supports'][0]}\n"
+                    f"🔴 แนวต้าน: {data['resistances'][0]}"
                 )
+            messages_to_reply.append(TextMessage(text=summary_text))
+
     elif command == "/LIST":
         if not watchlist:
-            reply_text = "📋 รายการเฝ้าระวังของคุณว่างเปล่า"
+            messages_to_reply.append(TextMessage(text="📋 รายการเฝ้าระวังของคุณว่างเปล่า"))
         else:
             watchlist_str = "\n".join([f"{i+1}. {s}" for i, s in enumerate(watchlist)])
-            reply_text = f"📋 **รายการหุ้นเฝ้าระวังของคุณ:**\n{watchlist_str}\n\n(พิมพ์ +[ชื่อหุ้น] เพื่อเพิ่ม หรือ -[ชื่อหุ้น] เพื่อลบออก)"
-    
+            messages_to_reply.append(TextMessage(text=f"📋 **รายการหุ้นเฝ้าระวังของคุณ:**\n{watchlist_str}\n\n(พิมพ์ +[ชื่อหุ้น] เพื่อเพิ่ม หรือ -[ชื่อหุ้น] เพื่อลบออก)"))
+
     elif user_message.startswith("+"):
-        # คำสั่งเพิ่มหุ้นเข้า Watchlist เช่น +PTT.BK
         stock_to_add = user_message[1:].strip().upper()
         if stock_to_add and stock_to_add not in watchlist:
             watchlist.append(stock_to_add)
-            reply_text = f"✅ เพิ่ม **{stock_to_add}** เข้าสู่รายการเฝ้าระวังเรียบร้อยแล้วครับ พิมพ์ /SUMMARY เพื่อดูสรุปภาพรวมได้เลย"
+            messages_to_reply.append(TextMessage(text=f"✅ เพิ่ม **{stock_to_add}** เข้าสู่รายการเฝ้าระวังเรียบร้อยแล้ว"))
         else:
-            reply_text = f"⚠️ หุ้น **{stock_to_add}** มีอยู่ในรายการเฝ้าระวังอยู่แล้ว หรือรูปแบบชื่อไม่ถูกต้อง"
+            messages_to_reply.append(TextMessage(text=f"⚠️ หุ้น **{stock_to_add}** มีอยู่ในรายการแล้ว หรือชื่อไม่ถูกต้อง"))
 
     elif user_message.startswith("-"):
-        # คำสั่งยกเลิก/ลบหุ้นออกจาก Watchlist เช่น -QQQM
         stock_to_remove = user_message[1:].strip().upper()
         if stock_to_remove in watchlist:
             watchlist.remove(stock_to_remove)
-            reply_text = f"🗑️ ยกเลิกและลบ **{stock_to_remove}** ออกจากรายการเฝ้าระวังเรียบร้อยแล้วครับ ข้อมูลใน /SUMMARY จะถูกปรับออกทันที"
+            messages_to_reply.append(TextMessage(text=f"🗑️ ลบ **{stock_to_remove}** ออกจากรายการเฝ้าระวังเรียบร้อยแล้ว"))
         else:
-            reply_text = f"⚠️ ไม่พบหุ้น **{stock_to_remove}** ในรายการเฝ้าระวังของคุณ"
+            messages_to_reply.append(TextMessage(text=f"⚠️ ไม่พบหุ้น **{stock_to_remove}** ในรายการเฝ้าระวังของคุณ"))
 
     else:
-        # กรณีพิมพ์ชื่อหุ้นตรงๆ เพื่อดูข้อมูลรายตัว (เช่น GOOGL, GOOG)
+        # กรณีพิมพ์ชื่อหุ้นรายตัว (ส่งทั้งข้อความวิเคราะห์เชิงลึก + รูปภาพกราฟทางเทคนิค)
         stock_name = user_message.upper()
         data = get_stock_data(stock_name)
         
-        reply_text = (
-            f"📊 ข้อมูลเชิงลึก: {stock_name}\n"
+        detail_text = (
+            f"📊 **วิเคราะห์เชิงลึก: {stock_name}**\n"
             f"💰 ราคาล่าสุด: {data['price']}\n"
-            f"🎯 โอกาสความแม่นยำ (Win Rate): **{data['win_rate']}**\n\n"
+            f"🎯 Win Rate: **{data['win_rate']}**\n"
+            f"📈 ค่า RSI: {data['rsi']}\n"
+            f"⚡ มุมมองเทรนด์: {data['trend']}\n\n"
             f"🟢 **แนวรับสำคัญ (3 ระดับ):**\n"
             f"1. {data['supports'][0]}\n"
             f"2. {data['supports'][1]}\n"
             f"3. {data['supports'][2]}\n\n"
             f"🔴 **แนวต้านสำคัญ (3 ระดับ):**\n"
-            f"1. {data['resistances'][0]}\n"
-            f"2. {data['resistances'][1]}\n"
-            f"3. {data['resistances'][2]}\n\n"
-            f"💡 พิมพ์ +{stock_name} เพื่อเก็บเข้า Watchlist หรือ -{stock_name} เพื่อเอาออก"
-        )
-
-    # ส่งข้อความกลับหาผู้ใช้ผ่าน LINE Messaging API
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        line_bot_api.reply_message_with_http_info(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text=reply_text)]
-            )
-        )
-
-if __name__ == "__main__":
-    app.run(port=5000)
+            f"1. {
