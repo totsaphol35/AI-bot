@@ -186,4 +186,28 @@ def handle_message(event):
             f"2. {data['supports'][1]}\n"
             f"3. {data['supports'][2]}\n\n"
             f"🔴 **แนวต้านสำคัญ (3 ระดับ):**\n"
-            f"1. {
+            f"1. {data['resistances'][0]}\n"
+            f"2. {data['resistances'][1]}\n"
+            f"3. {data['resistances'][2]}\n\n"
+            f"💡 พิมพ์ +{stock_name} เพื่อเก็บเข้า Watchlist"
+        )
+        # ส่งข้อความวิเคราะห์
+        messages_to_reply.append(TextMessage(text=detail_text))
+        # ส่งรูปกราฟทางเทคนิคประกอบ (Professional Touch)
+        messages_to_reply.append(ImageMessage(
+            original_content_url=data['chart_url'],
+            preview_image_url=data['chart_url']
+        ))
+
+    # ส่งข้อความกลับหาผู้ใช้ผ่าน LINE Messaging API (รองรับส่งหลาย Message พร้อมกัน)
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        line_bot_api.reply_message_with_http_info(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=messages_to_reply
+            )
+        )
+
+if __name__ == "__main__":
+    app.run(port=5000)
