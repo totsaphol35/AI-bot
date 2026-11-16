@@ -1,7 +1,7 @@
 import os
 import io
 import matplotlib
-matplotlib.use('Agg') # สำหรับรันบน Server ที่ไม่มีหน้าจอ
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
@@ -16,7 +16,8 @@ from linebot.v3.messaging import (
     MessagingApi,
     ReplyMessageRequest,
     TextMessage,
-    ImageMessage
+    FlexSendMessage,
+    FlexContainer
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
@@ -26,10 +27,10 @@ app = Flask(__name__)
 configuration = Configuration(access_token=os.getenv('LINE_CHANNEL_ACCESS_TOKEN', 'YOUR_CHANNEL_ACCESS_TOKEN'))
 handler = WebhookHandler(os.getenv('LINE_CHANNEL_SECRET', 'YOUR_CHANNEL_SECRET'))
 
-# Dictionary เก็บรายการ Watchlist รายบุคคล
+# Dictionary จำลองฐานข้อมูล Watchlist รายบุคคล และราคาเป้าหมายสำหรับ Price Alert
 user_watchlists = {}
+user_price_alerts = {}  # โครงสร้างสำหรับระบบแจ้งเตือน: { user_id: { "GOOGL": 280.0 } }
 
-# ฟังก์ชันคำนวณ RSI จากข้อมูลราคาปิดย้อนหลัง
 def calculate_rsi(data, window=14):
     delta = data.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
@@ -38,11 +39,10 @@ def calculate_rsi(data, window=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi.iloc[-1]
 
-# ฟังก์ชันดึงข้อมูลหุ้น Real-Time ผ่าน yfinance
 def get_realtime_stock_data(symbol):
     try:
         stock = yf.Ticker(symbol)
-        df = stock.history(period="1mo") # ดึงข้อมูลย้อนหลัง 1 เดือนเพื่อคำนวณทางเทคนิค
+        df = stock.history(period="1mo")
         
         if df.empty:
             return None
@@ -51,77 +51,141 @@ def get_realtime_stock_data(symbol):
         prev_close = df['Close'].iloc[-2]
         price_change = ((current_price - prev_close) / prev_close) * 100
 
-        # คำนวณ RSI
         rsi_val = calculate_rsi(df['Close'])
         if pd.isna(rsi_val):
             rsi_val = 50.0
 
-        # คำนวณแนวรับ - แนวต้านเบื้องต้นจาก High/Low ย้อนหลัง
         recent_high = df['High'].tail(10).max()
         recent_low = df['Low'].tail(10).min()
         
         supports = [
             f"{round(current_price * 0.98, 2)} (ใกล้สุด)",
-            f"{round(recent_low, 2)} (แนวรับหลัก)",
-            f"{round(recent_low * 0.95, 2)} (แข็งแกร่งสุด)"
+            f"{round(recent_low, 2)} (แนวรับหลัก)"
         ]
         resistances = [
             f"{round(current_price * 1.02, 2)} (ใกล้สุด)",
-            f"{round(recent_high, 2)} (แนวต้านสำคัญ)",
-            f"{round(recent_high * 1.05, 2)} (เป้าหมายถัดไป)"
+            f"{round(recent_high, 2)} (แนวต้านสำคัญ)"
         ]
 
-        # ประเมิน Win Rate และเทรนด์จาก RSI
         if rsi_val < 30:
-            rsi_text = f"{round(rsi_val, 1)} (Oversold - โอกาสสะสม)"
+            rsi_text = f"{round(rsi_val, 1)} (Oversold 🟢)"
             win_rate = "75.0%"
-            trend = "Rebound Zone (เตรียมกลับตัว)"
         elif rsi_val > 70:
-            rsi_text = f"{round(rsi_val, 1)} (Overbought - ระวังแรงขาย)"
+            rsi_text = f"{round(rsi_val, 1)} (Overbought 🔴)"
             win_rate = "65.0%"
-            trend = "High Momentum (ระวังพักตัว)"
         else:
             rsi_text = f"{round(rsi_val, 1)} (Neutral)"
             win_rate = "71.5%"
-            trend = "Sideway / Normal Trend"
 
         currency = "THB" if ".BK" in symbol.upper() else "USD"
+        change_color = "#00d26a" if price_change >= 0 else "#ff4b4b"
+        change_sign = "+" if price_change >= 0 else ""
 
         return {
             "symbol": symbol.upper(),
             "price": f"{round(current_price, 2)} {currency}",
-            "change": f"{round(price_change, 2)}%",
+            "change": f"{change_sign}{round(price_change, 2)}%",
+            "change_color": change_color,
             "win_rate": win_rate,
             "rsi": rsi_text,
-            "trend": trend,
             "supports": supports,
-            "resistances": resistances,
-            "history_df": df
+            "resistances": resistances
         }
     except Exception as e:
         print(f"Error fetching data for {symbol}: {e}")
         return None
 
-# ฟังก์ชันสร้างรูปกราฟราคาจริงและบันทึกเป็นไบต์ภาพ
-def generate_chart_image(df, symbol):
-    plt.figure(figsize=(10, 5))
-    plt.plot(df.index, df['Close'], label='Close Price', color='#00d26a', linewidth=2)
-    plt.title(f"{symbol.upper()} - Real-Time Price Chart (1 Month)", fontsize=14, color='white')
-    plt.xlabel("Date", color='white')
-    plt.ylabel("Price", color='white')
-    plt.grid(True, linestyle='--', alpha=0.3)
-    
-    # ตกแต่งกราฟให้เป็นธีมมืดดูเป็นมืออาชีพ
-    plt.gca().set_facecolor('#1e1e1e')
-    plt.gcf().patch.set_facecolor('#121212')
-    plt.tick_params(colors='white', which='both')
-    
-    # บันทึกภาพลงในหน่วยความจำ (BytesIO)
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', facecolor=plt.gcf().get_facecolor())
-    buf.seek(0)
-    plt.close()
-    return buf
+# ฟังก์ชันสร้าง Flex Message การ์ดหุ้นระดับโปร
+def create_stock_flex_message(data):
+    flex_content = {
+      "type": "bubble",
+      "header": {
+        "type": "box",
+        "layout": "vertical",
+        "contents": [
+          {
+            "type": "text",
+            "text": f"📊 วิเคราะห์เชิงลึก: {data['symbol']}",
+            "weight": "bold",
+            "size": "lg",
+            "color": "#1DB446"
+          },
+          {
+            "type": "text",
+            "text": f"💰 ราคา: {data['price']} ({data['change']})",
+            "size": "sm",
+            "weight": "bold",
+            "color": data['change_color'],
+            "margin": "sm"
+          }
+        ]
+      },
+      "body": {
+        "type": "box",
+        "layout": "vertical",
+        "contents": [
+          {
+            "type": "text",
+            "text": f"🎯 Win Rate: {data['win_rate']} | 📈 RSI: {data['rsi']}",
+            "size": "xs",
+            "color": "#555555"
+          },
+          {
+            "type": "separator",
+            "margin": "md"
+          },
+          {
+            "type": "text",
+            "text": f"🟢 แนวรับ: {data['supports'][0]} / {data['supports'][1]}",
+            "size": "xs",
+            "color": "#008000",
+            "margin": "md",
+            "wrap": True
+          },
+          {
+            "type": "text",
+            "text": f"🔴 แนวต้าน: {data['resistances'][0]} / {data['resistances'][1]}",
+            "size": "xs",
+            "color": "#FF0000",
+            "margin": "sm",
+            "wrap": True
+          }
+        ]
+      },
+      "footer": {
+        "type": "box",
+        "layout": "horizontal",
+        "spacing": "sm",
+        "contents": [
+          {
+            "type": "button",
+            "action": {
+              "type": "message",
+              "label": "➕ เพิ่ม Watchlist",
+              "text": f"+{data['symbol']}"
+            },
+            "style": "primary",
+            "color": "#1DB446",
+            "height": "sm"
+          },
+          {
+            "type": "button",
+            "action": {
+              "type": "message",
+              "label": "🗑️ ลบออก",
+              "text": f"-{data['symbol']}"
+            },
+            "style": "secondary",
+            "color": "#ff4b4b",
+            "height": "sm"
+          }
+        ]
+      }
+    }
+    return FlexSendMessage(
+        alt_text=f"รายงานวิเคราะห์หุ้น {data['symbol']}",
+        contents=FlexContainer.from_dict(flex_content)
+    )
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -132,7 +196,7 @@ def callback():
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        app.logger.info("Invalid signature. Please check your channel access token/secret.")
+        app.logger.info("Invalid signature.")
         abort(400)
 
     return 'OK'
@@ -144,44 +208,36 @@ def handle_message(event):
     command = user_message.upper()
 
     if user_id not in user_watchlists:
-        user_watchlists[user_id] = ["GOOGL", "GOOG", "QQQM", "RKLB"]
+        user_watchlists[user_id] = ["GOOGL", "QQQM", "RKLB"]
 
     watchlist = user_watchlists[user_id]
     messages_to_reply = []
 
     if command == "/HELP":
         help_text = (
-            "📖 คู่มือบอต 'ผู้หยั่งรู้หุ้น' (Real-Time Pro)\n\n"
-            "• พิมพ์ชื่อหุ้น (เช่น GOOGL, GOOG, NVDA, PTT.BK) เพื่อดูราคาจริง + กราฟ\n"
-            "• พิมพ์ +[ชื่อหุ้น] เช่น +AAPL เพื่อเพิ่มเข้า Watchlist\n"
-            "• พิมพ์ -[ชื่อหุ้น] เช่น -QQQM เพื่อลบออกจาก Watchlist\n"
-            "• /SUMMARY - สรุปภาพรวมหุ้นทั้งหมดใน Watchlist พร้อมราคาจริง\n"
+            "📖 คู่มือบอต 'ผู้หยั่งรู้หุ้น' (Pro Flex Version)\n\n"
+            "• พิมพ์ชื่อหุ้น (เช่น GOOGL, NVDA, PTT.BK) เพื่อดูการ์ดวิเคราะห์\n"
+            "• พิมพ์ +[ชื่อหุ้น] เพื่อเพิ่มเข้า Watchlist\n"
+            "• พิมพ์ -[ชื่อหุ้น] เพื่อลบออกจาก Watchlist\n"
+            "• /SUMMARY - สรุปภาพรวม Watchlist ทั้งหมด\n"
             "• /LIST - แสดงรายชื่อหุ้นใน Watchlist"
         )
         messages_to_reply.append(TextMessage(text=help_text))
 
     elif command == "/SUMMARY":
         if not watchlist:
-            messages_to_reply.append(TextMessage(text="📭 รายการเฝ้าระวังว่างเปล่า เพิ่มหุ้นด้วยคำสั่ง +[ชื่อหุ้น]"))
+            messages_to_reply.append(TextMessage(text="📭 รายการเฝ้าระวังของคุณว่างเปล่า"))
         else:
-            summary_text = f"📊 **สรุปภาพรวม Watchlist Real-Time ({len(watchlist)} ตัว):**\n"
+            summary_text = f"📊 **สรุปภาพรวม Watchlist ({len(watchlist)} ตัว):**\n"
             for stock in watchlist:
                 data = get_realtime_stock_data(stock)
                 if data:
-                    summary_text += (
-                        f"\n--------------------\n"
-                        f"📌 **{data['symbol']}** | 💰 {data['price']} ({data['change']})\n"
-                        f"🎯 Win Rate: {data['win_rate']} | 📈 RSI: {data['rsi']}\n"
-                        f"🟢 แนวรับ: {data['supports'][0]}\n"
-                        f"🔴 แนวต้าน: {data['resistances'][0]}"
-                    )
-                else:
-                    summary_text += f"\n--------------------\n📌 **{stock}** | ⚠️ ไม่พบข้อมูลราคา"
+                    summary_text += f"\n• **{data['symbol']}** : {data['price']} ({data['change']}) | RSI: {data['rsi']}"
             messages_to_reply.append(TextMessage(text=summary_text))
 
     elif command == "/LIST":
         if not watchlist:
-            messages_to_reply.append(TextMessage(text="📋 รายการเฝ้าระวังของคุณว่างเปล่า"))
+            messages_to_reply.append(TextMessage(text="📋 รายการเฝ้าระวังว่างเปล่า"))
         else:
             watchlist_str = "\n".join([f"{i+1}. {s}" for i, s in enumerate(watchlist)])
             messages_to_reply.append(TextMessage(text=f"📋 **รายการหุ้นเฝ้าระวังของคุณ:**\n{watchlist_str}"))
@@ -192,9 +248,9 @@ def handle_message(event):
             test_check = get_realtime_stock_data(stock_to_add)
             if test_check:
                 watchlist.append(stock_to_add)
-                messages_to_reply.append(TextMessage(text=f"✅ เพิ่ม **{stock_to_add}** เข้า Watchlist สำเร็จ! (ราคาปัจจุบัน: {test_check['price']})"))
+                messages_to_reply.append(TextMessage(text=f"✅ เพิ่ม **{stock_to_add}** เข้า Watchlist สำเร็จ!"))
             else:
-                messages_to_reply.append(TextMessage(text=f"⚠️ ไม่พบสัญลักษณ์หุ้น '{stock_to_add}' ในตลาด กรุณาตรวจสอบชื่อย่ออีกครั้ง"))
+                messages_to_reply.append(TextMessage(text=f"⚠️ ไม่พบสัญลักษณ์หุ้น '{stock_to_add}' ในตลาด"))
         else:
             messages_to_reply.append(TextMessage(text=f"⚠️ หุ้นนี้มีอยู่ในรายการอยู่แล้วหรือรูปแบบไม่ถูกต้อง"))
 
@@ -204,39 +260,18 @@ def handle_message(event):
             watchlist.remove(stock_to_remove)
             messages_to_reply.append(TextMessage(text=f"🗑️ ลบ **{stock_to_remove}** ออกจาก Watchlist เรียบร้อยแล้ว"))
         else:
-            messages_to_reply.append(TextMessage(text=f"⚠️ ไม่พบหุ้นนี้ในรายการเฝ้าระวังของคุณ"))
+            messages_to_reply.append(TextMessage(text=f"⚠️ ไม่พบหุ้นนี้ในรายการเฝ้าระวัง"))
 
     else:
         stock_name = user_message.upper()
         data = get_realtime_stock_data(stock_name)
         
         if data:
-            detail_text = (
-                f"📊 **วิเคราะห์เชิงลึก Real-Time: {data['symbol']}**\n"
-                f"💰 ราคาปัจจุบัน: {data['price']} (เปลี่ยนแปลง: {data['change']})\n"
-                f"🎯 Win Rate: **{data['win_rate']}**\n"
-                f"📈 ค่า RSI: {data['rsi']}\n"
-                f"⚡ มุมมองเทรนด์: {data['trend']}\n\n"
-                f"🟢 **แนวรับสำคัญ (3 ระดับ):**\n"
-                f"1. {data['supports'][0]}\n"
-                f"2. {data['supports'][1]}\n"
-                f"3. {data['supports'][2]}\n\n"
-                f"🔴 **แนวต้านสำคัญ (3 ระดับ):**\n"
-                f"1. {data['resistances'][0]}\n"
-                f"2. {data['resistances'][1]}\n"
-                f"3. {data['resistances'][2]}\n\n"
-                f"💡 พิมพ์ +{data['symbol']} เพื่อเก็บเข้า Watchlist"
-            )
-            messages_to_reply.append(TextMessage(text=detail_text))
-            
-            # หมายเหตุ: สำหรับการส่งรูปภาพจริงผ่าน LINE API บน Server จริง 
-            # คุณจะต้องอัปโหลดไฟล์รูปกราฟที่สร้างขึ้นเก็บไว้บน Cloud Storage (เช่น AWS S3, Imgur API หรือโฟลเดอร์ในเว็บเซิร์ฟเวอร์ของคุณ) 
-            # แล้วส่ง URL รูปภาพนั้นเข้ามาใน ImageMessage แทนครับ
-            # ตัวอย่างนี้จำลองโครงสร้างการเรียกใช้งาน ImageMessage:
-            # messages_to_reply.append(ImageMessage(original_content_url="YOUR_IMAGE_URL", preview_image_url="YOUR_IMAGE_URL"))
-            
+            # ส่งการ์ด Flex Message สุดหรูหราพร้อมปุ่มกดอัจฉริยะ
+            flex_msg = create_stock_flex_message(data)
+            messages_to_reply.append(flex_msg)
         else:
-            messages_to_reply.append(TextMessage(text=f"⚠️ ไม่พบข้อมูลหุ้น '{stock_name}' กรุณาตรวจสอบตัวย่อ เช่น GOOGL, GOOG, AAPL, PTT.BK"))
+            messages_to_reply.append(TextMessage(text=f"⚠️ ไม่พบข้อมูลหุ้น '{stock_name}' กรุณาตรวจสอบตัวย่ออีกครั้ง"))
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
