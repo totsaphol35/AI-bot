@@ -1,4 +1,5 @@
 import os
+import requests
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -8,11 +9,25 @@ import pandas as pd
 
 app = Flask(__name__)
 
+# ดึง Token และ Secret จาก Environment Variables บน Render
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "YOUR_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "YOUR_CHANNEL_SECRET")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
+
+# Discord Webhook URL ที่คุณกำหนด
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1570698801839210506/Bq3O3AoHYUiAqCptfD6xpdW0idBfWafurPkz3DY53_qYxR7gOAFlGF4vFWK4kOC1U1-d"
+
+def send_discord_alert(message):
+    """ฟังก์ชันสำหรับส่งข้อความแจ้งเตือนเข้า Discord Webhook"""
+    payload = {"content": message}
+    try:
+        response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
+        return response.status_code == 204
+    except Exception as e:
+        print(f"Discord alert error: {e}")
+        return False
 
 @app.route("/")
 def home():
@@ -20,7 +35,7 @@ def home():
 
 @app.route("/callback", methods=['POST'])
 def callback():
-    signature = request.headers['X-Line-Signature']
+    signature = request.headers.get('X-Line-Signature', '')
     body = request.get_data(as_text=True)
     app.logger.info("Request body: " + body)
     try:
@@ -40,9 +55,9 @@ def handle_message(event):
         if text in ["/HELP", "HELP", "เมนู", "คำสั่ง"]:
             reply_text = (
                 "🤖 คู่มือการใช้งาน Totsaphol ผู้หยั่งรู้หุ้น:\n\n"
-                "• พิมพ์ชื่อย่อหุ้น/ทอง เช่น QQQM, GC=F, PTT.BK เพื่อดูราคา แนวรับ และแนวต้าน\n"
+                "• พิมพ์ชื่อย่อหุ้น/ทอง เช่น QQQM, GC=F, PTT.BK, SCHG เพื่อดูราคา แนวรับ และแนวต้าน\n"
                 "• พิมพ์ XAUUSD เพื่อเช็คราคาทองคำ\n"
-                "• พิมพ์ /summary เพื่อดูสรุปภาพรวมตลาด"
+                "• พิมพ์ /SUMMARY เพื่อดูสรุปภาพรวมตลาด"
             )
 
         # 2. คำสั่งสรุปภาพรวมตลาด
@@ -59,7 +74,7 @@ def handle_message(event):
                 except:
                     pass
 
-        # 3. กรณีพิมพ์ถามหุ้นหรือทองคำรายตัว (เช่น QQQM, PTT.BK, XAUUSD)
+        # 3. กรณีพิมพ์ถามหุ้นหรือทองคำรายตัว (พร้อมทดสอบยิงแจ้งเตือนตัวอย่างเข้า Discord ด้วย)
         else:
             target_symbol = "GC=F" if text == "XAUUSD" else raw_text
             
@@ -71,7 +86,6 @@ def handle_message(event):
                 support = df['Low'].tail(20).min()
                 resistance = df['High'].tail(20).max()
                 
-                # ตรวจสอบว่าเป็นสกุลเงินบาทหรือดอลลาร์
                 currency_unit = "บาท" if ".BK" in target_symbol.upper() else "USD"
                 
                 reply_text = (
@@ -80,6 +94,16 @@ def handle_message(event):
                     f"🟢 แนวรับ (20D): {support:.2f} {currency_unit}\n"
                     f"🔴 แนวต้าน (20D): {resistance:.2f} {currency_unit}"
                 )
+
+                # ตัวอย่าง: ส่งข้อมูลเข้า Discord ทันทีที่มีการค้นหาหุ้นตัวนั้นๆ
+                discord_msg = (
+                    f"🔔 **รายงานข้อมูลสินทรัพย์**: `{target_symbol.upper()`}\n"
+                    f"• ราคาร่าสุด: `{current_price:.2f} {currency_unit}`\n"
+                    f"• แนวรับ (20D): `{support:.2f} {currency_unit}`\n"
+                    f"• แนวต้าน (20D): `{resistance:.2f} {currency_unit}`"
+                )
+                send_discord_alert(discord_msg)
+
             else:
                 reply_text = f"❌ ไม่พบข้อมูลสำหรับ '{raw_text}' กรุณาตรวจสอบชื่อย่อใหม่อีกครั้งครับ"
 
