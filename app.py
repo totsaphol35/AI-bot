@@ -1,11 +1,7 @@
 import os
-import io
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+import yfinance as yf
 import pandas as pd
 import numpy as np
-import yfinance as yf
 
 from flask import Flask, request, abort
 from linebot.v3 import WebhookHandler
@@ -15,9 +11,7 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     ReplyMessageRequest,
-    TextMessage,
-    FlexSendMessage,
-    FlexContainer
+    TextMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
@@ -27,9 +21,8 @@ app = Flask(__name__)
 configuration = Configuration(access_token=os.getenv('LINE_CHANNEL_ACCESS_TOKEN', 'YOUR_CHANNEL_ACCESS_TOKEN'))
 handler = WebhookHandler(os.getenv('LINE_CHANNEL_SECRET', 'YOUR_CHANNEL_SECRET'))
 
-# Dictionary จำลองฐานข้อมูล Watchlist รายบุคคล และราคาเป้าหมายสำหรับ Price Alert
+# Dictionary จำลอง Watchlist รายบุคคล
 user_watchlists = {}
-user_price_alerts = {}  # โครงสร้างสำหรับระบบแจ้งเตือน: { user_id: { "GOOGL": 280.0 } }
 
 def calculate_rsi(data, window=14):
     delta = data.diff()
@@ -78,14 +71,12 @@ def get_realtime_stock_data(symbol):
             win_rate = "71.5%"
 
         currency = "THB" if ".BK" in symbol.upper() else "USD"
-        change_color = "#00d26a" if price_change >= 0 else "#ff4b4b"
         change_sign = "+" if price_change >= 0 else ""
 
         return {
             "symbol": symbol.upper(),
             "price": f"{round(current_price, 2)} {currency}",
             "change": f"{change_sign}{round(price_change, 2)}%",
-            "change_color": change_color,
             "win_rate": win_rate,
             "rsi": rsi_text,
             "supports": supports,
@@ -94,98 +85,6 @@ def get_realtime_stock_data(symbol):
     except Exception as e:
         print(f"Error fetching data for {symbol}: {e}")
         return None
-
-# ฟังก์ชันสร้าง Flex Message การ์ดหุ้นระดับโปร
-def create_stock_flex_message(data):
-    flex_content = {
-      "type": "bubble",
-      "header": {
-        "type": "box",
-        "layout": "vertical",
-        "contents": [
-          {
-            "type": "text",
-            "text": f"📊 วิเคราะห์เชิงลึก: {data['symbol']}",
-            "weight": "bold",
-            "size": "lg",
-            "color": "#1DB446"
-          },
-          {
-            "type": "text",
-            "text": f"💰 ราคา: {data['price']} ({data['change']})",
-            "size": "sm",
-            "weight": "bold",
-            "color": data['change_color'],
-            "margin": "sm"
-          }
-        ]
-      },
-      "body": {
-        "type": "box",
-        "layout": "vertical",
-        "contents": [
-          {
-            "type": "text",
-            "text": f"🎯 Win Rate: {data['win_rate']} | 📈 RSI: {data['rsi']}",
-            "size": "xs",
-            "color": "#555555"
-          },
-          {
-            "type": "separator",
-            "margin": "md"
-          },
-          {
-            "type": "text",
-            "text": f"🟢 แนวรับ: {data['supports'][0]} / {data['supports'][1]}",
-            "size": "xs",
-            "color": "#008000",
-            "margin": "md",
-            "wrap": True
-          },
-          {
-            "type": "text",
-            "text": f"🔴 แนวต้าน: {data['resistances'][0]} / {data['resistances'][1]}",
-            "size": "xs",
-            "color": "#FF0000",
-            "margin": "sm",
-            "wrap": True
-          }
-        ]
-      },
-      "footer": {
-        "type": "box",
-        "layout": "horizontal",
-        "spacing": "sm",
-        "contents": [
-          {
-            "type": "button",
-            "action": {
-              "type": "message",
-              "label": "➕ เพิ่ม Watchlist",
-              "text": f"+{data['symbol']}"
-            },
-            "style": "primary",
-            "color": "#1DB446",
-            "height": "sm"
-          },
-          {
-            "type": "button",
-            "action": {
-              "type": "message",
-              "label": "🗑️ ลบออก",
-              "text": f"-{data['symbol']}"
-            },
-            "style": "secondary",
-            "color": "#ff4b4b",
-            "height": "sm"
-          }
-        ]
-      }
-    }
-    return FlexSendMessage(
-        alt_text=f"รายงานวิเคราะห์หุ้น {data['symbol']}",
-        contents=FlexContainer.from_dict(flex_content)
-    )
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -215,8 +114,8 @@ def handle_message(event):
 
     if command == "/HELP":
         help_text = (
-            "📖 คู่มือบอต 'ผู้หยั่งรู้หุ้น' (Pro Flex Version)\n\n"
-            "• พิมพ์ชื่อหุ้น (เช่น GOOGL, NVDA, PTT.BK) เพื่อดูการ์ดวิเคราะห์\n"
+            "📖 คู่มือบอต 'ผู้หยั่งรู้หุ้น' (Real-Time Pro)\n\n"
+            "• พิมพ์ชื่อหุ้น (เช่น GOOGL, NVDA, PTT.BK) เพื่อดูราคาจริง\n"
             "• พิมพ์ +[ชื่อหุ้น] เพื่อเพิ่มเข้า Watchlist\n"
             "• พิมพ์ -[ชื่อหุ้น] เพื่อลบออกจาก Watchlist\n"
             "• /SUMMARY - สรุปภาพรวม Watchlist ทั้งหมด\n"
@@ -267,9 +166,20 @@ def handle_message(event):
         data = get_realtime_stock_data(stock_name)
         
         if data:
-            # ส่งการ์ด Flex Message สุดหรูหราพร้อมปุ่มกดอัจฉริยะ
-            flex_msg = create_stock_flex_message(data)
-            messages_to_reply.append(flex_msg)
+            detail_text = (
+                f"📊 **วิเคราะห์เชิงลึก: {data['symbol']}**\n"
+                f"💰 ราคาปัจจุบัน: {data['price']} ({data['change']})\n"
+                f"🎯 Win Rate: **{data['win_rate']}**\n"
+                f"📈 ค่า RSI: {data['rsi']}\n\n"
+                f"🟢 **แนวรับสำคัญ:**\n"
+                f"1. {data['supports'][0]}\n"
+                f"2. {data['supports'][1]}\n\n"
+                f"🔴 **แนวต้านสำคัญ:**\n"
+                f"1. {data['resistances'][0]}\n"
+                f"2. {data['resistances'][1]}\n\n"
+                f"💡 พิมพ์ +{data['symbol']} เพื่อเก็บเข้า Watchlist"
+            )
+            messages_to_reply.append(TextMessage(text=detail_text))
         else:
             messages_to_reply.append(TextMessage(text=f"⚠️ ไม่พบข้อมูลหุ้น '{stock_name}' กรุณาตรวจสอบตัวย่ออีกครั้ง"))
 
