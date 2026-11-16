@@ -16,7 +16,7 @@ LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "YOUR_CHANNEL_SECRET
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# Discord Webhook URL ที่คุณกำหนด
+# Discord Webhook URL ของคุณ
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1570698801839210506/Bq3O3AoHYUiAqCptfD6xpdW0idBfWafurPkz3DY53_qYxR7gOAFlGF4vFWK4kOC1U1-d"
 
 def send_discord_alert(message):
@@ -57,7 +57,7 @@ def handle_message(event):
                 "🤖 คู่มือการใช้งาน Totsaphol ผู้หยั่งรู้หุ้น:\n\n"
                 "• พิมพ์ชื่อย่อหุ้น/ทอง เช่น QQQM, GC=F, PTT.BK, SCHG เพื่อดูราคา แนวรับ และแนวต้าน\n"
                 "• พิมพ์ XAUUSD เพื่อเช็คราคาทองคำ\n"
-                "• พิมพ์ /SUMMARY เพื่อดูสรุปภาพรวมตลาด"
+                "•พิมพ์ /SUMMARY เพื่อดูสรุปภาพรวมตลาด"
             )
 
         # 2. คำสั่งสรุปภาพรวมตลาด
@@ -74,7 +74,7 @@ def handle_message(event):
                 except:
                     pass
 
-        # 3. กรณีพิมพ์ถามหุ้นหรือทองคำรายตัว (พร้อมทดสอบยิงแจ้งเตือนตัวอย่างเข้า Discord ด้วย)
+        # 3. กรณีพิมพ์ถามหุ้นหรือทองคำรายตัว
         else:
             target_symbol = "GC=F" if text == "XAUUSD" else raw_text
             
@@ -95,9 +95,9 @@ def handle_message(event):
                     f"🔴 แนวต้าน (20D): {resistance:.2f} {currency_unit}"
                 )
 
-                # ตัวอย่าง: ส่งข้อมูลเข้า Discord ทันทีที่มีการค้นหาหุ้นตัวนั้นๆ
+                # ส่งข้อมูลเข้า Discord ทันทีที่มีการค้นหา (แก้ไขวงเล็บ f-string ให้ถูกต้องแล้ว)
                 discord_msg = (
-                    f"🔔 **รายงานข้อมูลสินทรัพย์**: `{target_symbol.upper()`}\n"
+                    f"🔔 **รายงานข้อมูลสินทรัพย์**: `{target_symbol.upper()}`\n"
                     f"• ราคาร่าสุด: `{current_price:.2f} {currency_unit}`\n"
                     f"• แนวรับ (20D): `{support:.2f} {currency_unit}`\n"
                     f"• แนวต้าน (20D): `{resistance:.2f} {currency_unit}`"
