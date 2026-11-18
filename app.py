@@ -1,4 +1,7 @@
 import os
+import time
+import threading
+import requests
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -21,20 +24,23 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 app = Flask(__name__)
 
-# ตั้งค่า LINE Access Token และ Secret จาก Environment Variables บน Render
+# ตั้งค่า LINE Access Token, Secret และ Discord Webhook URL จาก Environment Variables บน Render
 configuration = Configuration(access_token=os.getenv('LINE_CHANNEL_ACCESS_TOKEN', 'YOUR_CHANNEL_ACCESS_TOKEN'))
 handler = WebhookHandler(os.getenv('LINE_CHANNEL_SECRET', 'YOUR_CHANNEL_SECRET'))
+DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL', '')
 
-# หน่วยความจำเก็บ Watchlist แยกตาม User
+# หน่วยความจำเก็บ Watchlist แยกตาม User และระบบกันแจ้งเตือนซ้ำใน Discord
 user_watchlists = {}
+discord_alert_cooldown = {}  # { "SYMBOL_ZONE": timestamp }
+last_auto_scan_time = 0      # ป้องกันการสแกนถี่เกินไปเมื่อ UptimeRobot ยิงมาทุก 5 นาที
 
-# คลังหุ้นชั้นนำระดับโลกสำหรับสแกนหา Setup
+# คลังหุ้นชั้นนำสำหรับสแกนเข้า Discord อัตโนมัติ
 GLOBAL_SCAN_POOL = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AVGO", "AMD", "NFLX",
     "QQQM", "SCHG", "JEPQ", "VOO", "RKLB", "PLTR", "COIN", "UBER", "CRM", "COST"
 ]
 
-# ฟังก์ชันดึงข้อมูลหุ้นแบบทำความสะอาดข้อมูล (Data Cleaning) และรองรับหลาย Timeframe
+# ฟังก์ชันดึงข้อมูลหุ้นแบบทำความสะอาดข้อมูล (Data Cleaning)
 def fetch_clean_history(symbol, period="1y", interval="1d"):
     symbol = symbol.upper().strip()
     df = pd.DataFrame()
@@ -70,7 +76,7 @@ def fetch_clean_history(symbol, period="1y", interval="1d"):
         
     return df
 
-# ฟังก์ชันดึงวันประกาศงบการเงิน (Earnings Date) เพื่อเตือนความเสี่ยง
+# ฟังก์ชันดึงวันประกาศงบการเงิน (Earnings Date)
 def get_upcoming_earnings(symbol):
     try:
         ticker = yf.Ticker(symbol)
@@ -79,10 +85,10 @@ def get_upcoming_earnings(symbol):
             dates = cal['Earnings Date']
             if dates:
                 next_date = pd.to_datetime(dates[0]).strftime('%Y-%m-%d')
-                return f"📅 งบออกถัดไป: {next_date}"
+                return f"📅 งบออก: {next_date}"
     except Exception:
         pass
-    return "📅 วันประกาศงบ: ยังไม่ระบุ"
+    return "📅 งบ: ยังไม่ระบุ"
 
 # 1. สูตร RSI มาตรฐาน Wilder's Smoothing
 def calculate_wilder_rsi(close_series, period=14):
@@ -113,7 +119,7 @@ def calculate_atr(df, period=14):
         atr_val = float(df['Close'].iloc[-1]) * 0.015
     return atr_val
 
-# 3. สูตรประมาณค่า Volume Profile POC (Point of Control)
+# 3. สูตรประมาณค่า Volume Profile POC
 def calculate_volume_poc(df, bins=25):
     recent_df = df.tail(126).dropna(subset=['High', 'Low', 'Close', 'Volume'])
     if recent_df.empty:
@@ -167,11 +173,8 @@ def analyze_leorio_smc(df, atr_val, ema_200):
     closes = df['Close'].values
     curr_price = float(closes[-1])
 
-    # 1. วิเคราะห์โครงสร้างตลาด BOS และ CHOCH (เทียบ Swing High / Swing Low รอบ 25 แท่ง)
     prev_swing_high = float(np.max(highs[-25:-5]))
     prev_swing_low = float(np.min(lows[-25:-5]))
-    recent_high = float(np.max(highs[-5:]))
-    recent_low = float(np.min(lows[-5:]))
 
     if curr_price > prev_swing_high:
         if curr_price >= ema_200:
@@ -187,16 +190,13 @@ def analyze_leorio_smc(df, atr_val, ema_200):
     else:
         smc["structure"] = "ย่อพักตัวในกรอบโครงสร้าง (Pullback)"
 
-    # 2. ตรวจจับ Liquidity Sweep ด้านล่าง (กวาดไส้หลุด Low เดิมแล้วดึงปิดกลับ)
     swept_low = any((l < prev_swing_low and c > prev_swing_low) for l, c in zip(lows[-5:], closes[-5:]))
     if swept_low:
         smc["liquidity_sweep"] = True
 
-    # 3. ค้นหา Demand Zone (แท่งเขียวใหญ่ยาว) และ Bullish OB (แท่งแดงโดดๆ ก่อนพุ่ง)
     for i in range(len(df) - 2, max(len(df) - 35, 1), -1):
         body_next = closes[i + 1] - opens[i + 1]
         is_bearish_ob = closes[i] < opens[i]
-        # แท่งเขียวใหญ่ยาว (Demand / Impulse)
         if body_next > 1.1 * atr_val and closes[i + 1] > highs[i]:
             if smc["demand_zone"] is None and curr_price >= lows[i + 1]:
                 smc["demand_zone"] = float((lows[i + 1] + opens[i + 1]) / 2.0)
@@ -205,7 +205,6 @@ def analyze_leorio_smc(df, atr_val, ema_200):
         if smc["demand_zone"] and smc["bull_ob"]:
             break
 
-    # 4. ค้นหา Supply Zone (แท่งแดงใหญ่ยาว) และ Bearish OB (แท่งเขียวโดดๆ ก่อนทุบ)
     for i in range(len(df) - 2, max(len(df) - 35, 1), -1):
         body_next = opens[i + 1] - closes[i + 1]
         is_bullish_ob = closes[i] > opens[i]
@@ -217,18 +216,14 @@ def analyze_leorio_smc(df, atr_val, ema_200):
         if smc["supply_zone"] and smc["bear_ob"]:
             break
 
-    # 5. ค้นหา Fair Value Gap (FVG - ช่องว่างระหว่างไส้เทียน 3 แท่ง)
     for i in range(len(df) - 1, max(len(df) - 30, 2), -1):
-        # Bullish FVG (อยู่ต่ำกว่าราคาปัจจุบัน)
         if lows[i] > highs[i - 2] and (lows[i] - highs[i - 2]) >= 0.15 * atr_val:
             if smc["bull_fvg"] is None and curr_price >= highs[i - 2]:
                 smc["bull_fvg"] = float((lows[i] + highs[i - 2]) / 2.0)
-        # Bearish FVG (อยู่สูงกว่าราคาปัจจุบัน)
         if highs[i] < lows[i - 2] and (lows[i - 2] - highs[i]) >= 0.15 * atr_val:
             if smc["bear_fvg"] is None and curr_price <= lows[i - 2]:
                 smc["bear_fvg"] = float((lows[i - 2] + highs[i]) / 2.0)
 
-    # 6. ค้นหา Hidden Base (แท่งพักตัวแคบๆ กลางทางก่อนพุ่งต่อ ใช้ร่วมกับ Fibonacci)
     for i in range(len(df) - 2, max(len(df) - 30, 1), -1):
         candle_range = highs[i] - lows[i]
         next_push = closes[i + 1] - opens[i + 1]
@@ -238,7 +233,6 @@ def analyze_leorio_smc(df, atr_val, ema_200):
                 smc["hidden_base"] = mid_hb
                 break
 
-    # สรุปคำแนะนำตามสูตรเลโอ
     if smc["liquidity_sweep"] and smc["is_bullish_shift"]:
         smc["action_note"] = "✅ Sweep + BOS/CHOCH ครบ! รอย่อรับ OB/FVG"
     elif smc["liquidity_sweep"]:
@@ -250,12 +244,16 @@ def analyze_leorio_smc(df, atr_val, ema_200):
 
     return smc
 
-# 5. ระบบจัดกลุ่ม Confluence แบบสมดุล (จำกัดคะแนนหุ้นขาลงเพื่อไม่ให้หลอกตา)
+# 5. ระบบจัดกลุ่ม Confluence แบบสมดุล
 def build_confluence_zones(candidates, current_price, atr_val, is_support=True, rsi_val=50, rvol=1.0, macd_turning_up=False, is_uptrend=True, has_bull_shift=False):
-    valid_candidates = [c for c in candidates if c['price'] > 0 and not np.isnan(c['price'])]
+    # บังคับกรองให้แนวรับต้องต่ำกว่าราคาปัจจุบัน และแนวต้านต้องสูงกว่าราคาปัจจุบัน 100% (ป้องกันบั๊กสลับข้าง)
+    if is_support:
+        valid_candidates = [c for c in candidates if 0 < c['price'] <= current_price and not np.isnan(c['price'])]
+    else:
+        valid_candidates = [c for c in candidates if c['price'] >= current_price and not np.isnan(c['price'])]
+        
     valid_candidates.sort(key=lambda x: x['price'], reverse=is_support)
     clusters = []
-    
     merge_threshold = 0.010
     
     for item in valid_candidates:
@@ -283,13 +281,10 @@ def build_confluence_zones(candidates, current_price, atr_val, is_support=True, 
             if is_uptrend: 
                 base_score += 8
             elif not has_bull_shift:
-                # หากเป็นขาลงใต้ EMA200 และยังไม่เกิด CHOCH ขาขึ้น ให้หักคะแนนความเสี่ยง
                 base_score -= 10
             if rsi_val <= 38: base_score += 5
             if rvol >= 1.2: base_score += 4
             if macd_turning_up: base_score += 4
-            
-            # จำกัดเพดานคะแนนแนวรับในหุ้นขาลงไม่ให้เกิน 75/100
             max_cap = 95 if (is_uptrend or has_bull_shift) else 75
         else:
             if not is_uptrend: base_score += 8
@@ -327,7 +322,7 @@ def build_confluence_zones(candidates, current_price, atr_val, is_support=True, 
         
     return results[:3]
 
-# 6. สมองกลวิเคราะห์หุ้นรายตัว (รวม LEORIO SMC + EMA 200 + POC + Fibonacci)
+# 6. สมองกลวิเคราะห์หุ้นรายตัว
 def get_pro_stock_data(symbol, interval="1d"):
     try:
         symbol = symbol.upper().strip()
@@ -369,11 +364,9 @@ def get_pro_stock_data(symbol, interval="1d"):
         fib_618 = high_60d - (0.618 * fib_range)
         fib_382 = high_60d - (0.382 * fib_range)
 
-        # เรียกใช้โมดูลวิเคราะห์เทคนิค LEORIO FX
         smc = analyze_leorio_smc(df, atr_val, ema_200)
         is_uptrend = current_price >= ema_200
 
-        # รวบรวมโซนแนวรับทั้งหมด (รวมโซนของ LEORIO FX)
         raw_supports = [
             {'price': min(low_60d, current_price - 1.5 * atr_val), 'label': 'Major Low', 'weight': 12},
             {'price': current_price - 1.8 * atr_val, 'label': 'ATR Support', 'weight': 9},
@@ -386,8 +379,6 @@ def get_pro_stock_data(symbol, interval="1d"):
             raw_supports.append({'price': poc_price, 'label': 'POC (Approx)', 'weight': 13})
         if fib_618 < current_price:
             raw_supports.append({'price': fib_618, 'label': 'Fibo 61.8%', 'weight': 12})
-            
-        # เพิ่มโซนจากตำรา LEORIO FX
         if smc["demand_zone"] and smc["demand_zone"] < current_price:
             raw_supports.append({'price': smc["demand_zone"], 'label': 'Demand Zone 🟢', 'weight': 15})
         if smc["bull_ob"] and smc["bull_ob"] < current_price:
@@ -395,12 +386,10 @@ def get_pro_stock_data(symbol, interval="1d"):
         if smc["bull_fvg"] and smc["bull_fvg"] < current_price:
             raw_supports.append({'price': smc["bull_fvg"], 'label': 'Bullish FVG ⚡', 'weight': 14})
         if smc["hidden_base"] and smc["hidden_base"] < current_price:
-            # Hidden Base ต้องคอนเฟิร์มด้วย Fibo ตามหลัก LEORIO FX
             is_fibo_aligned = abs(smc["hidden_base"] - fib_618) / current_price <= 0.025
-            hb_label = 'Hidden Base + Fibo (จุดเด้ง)' if is_fibo_aligned else 'Hidden Base (เด้งสั้น)'
+            hb_label = 'Hidden Base + Fibo' if is_fibo_aligned else 'Hidden Base'
             raw_supports.append({'price': smc["hidden_base"], 'label': hb_label, 'weight': 13 if is_fibo_aligned else 8})
 
-        # รวบรวมโซนแนวต้านทั้งหมด
         raw_resistances = [
             {'price': max(high_60d, current_price + 1.5 * atr_val), 'label': 'Major High', 'weight': 12},
             {'price': current_price + 1.8 * atr_val, 'label': 'ATR Target', 'weight': 9},
@@ -432,7 +421,7 @@ def get_pro_stock_data(symbol, interval="1d"):
         rr_ratio = reward / risk
 
         max_score = int(max(s['setup_score'] for s in sup_zones[:3]))
-        earnings_info = get_upcoming_earnings(symbol) if interval == "1d" else f"⏱️ Timeframe: {interval.upper()}"
+        earnings_info = get_upcoming_earnings(symbol) if interval == "1d" else f"⏱️ TF: {interval.upper()}"
 
         mom_tags = []
         if rsi_val <= 35: mom_tags.append("RSI Oversold 🟢")
@@ -448,6 +437,12 @@ def get_pro_stock_data(symbol, interval="1d"):
         return {
             "symbol": symbol,
             "interval": interval.upper(),
+            "raw_price": current_price,
+            "raw_rsi": rsi_val,
+            "raw_rr": rr_ratio,
+            "raw_sup1": sup_zones[0],
+            "raw_res1": res_zones[0],
+            "raw_sl": stop_loss,
             "price_str": f"{current_price:,.2f} {currency}",
             "change_str": f"{change_sign}{price_change:.2f}%",
             "change_color": change_color,
@@ -476,7 +471,69 @@ def get_pro_stock_data(symbol, interval="1d"):
         print(f"Error analyzing {symbol}: {e}")
         return None
 
-# 7. สร้างการ์ด Flex Message (LEORIO SMC + Quant Risk Edition)
+# 7. ระบบสแกนและแจ้งเตือนเข้า Discord เฉพาะเมื่อหุ้นเข้าใกล้ แนวรับ หรือ แนวต้าน เท่านั้น
+def scan_and_notify_discord():
+    if not DISCORD_WEBHOOK_URL:
+        return
+        
+    # รวมหุ้นใน GLOBAL_SCAN_POOL กับหุ้นที่ผู้ใช้เพิ่มไว้ใน Watchlist
+    all_symbols = list(GLOBAL_SCAN_POOL)
+    for wl in user_watchlists.values():
+        for s in wl:
+            if s not in all_symbols:
+                all_symbols.append(s)
+
+    now_ts = time.time()
+    cooldown_sec = 6 * 3600  # แจ้งเตือนซ้ำตัวเดิมโซนเดิมได้ไม่เกินทุกๆ 6 ชั่วโมง
+
+    for sym in all_symbols[:20]:
+        data = get_pro_stock_data(sym, "1d")
+        if not data:
+            continue
+
+        curr_p = data["raw_price"]
+        sup1 = data["raw_sup1"]
+        res1 = data["raw_res1"]
+
+        dist_to_sup_pct = ((curr_p - sup1["price"]) / max(sup1["price"], 0.01)) * 100
+        dist_to_res_pct = ((res1["price"] - curr_p) / max(curr_p, 0.01)) * 100
+
+        # เงื่อนไขที่ 1: ราคาเข้าใกล้แนวรับ L1 ในระยะ <= 2.0% และมีคะแนน Setup >= 68
+        if 0 <= dist_to_sup_pct <= 2.0 and sup1["setup_score"] >= 68:
+            key = f"{sym}_SUP"
+            if now_ts - discord_alert_cooldown.get(key, 0) > cooldown_sec:
+                discord_alert_cooldown[key] = now_ts
+                msg = (
+                    f"🟢 **[LEORIO & Quant Alert] ราคาเข้าโซนแนวรับสำคัญ!**\n"
+                    f"• **สินทรัพย์:** `{data['symbol']}` | **ราคาล่าสุด:** `{data['price_str']}` ({data['change_str']})\n"
+                    f"• **โครงสร้าง:** {data['structure']} | **RSI:** `{data['raw_rsi']:.1f}`\n"
+                    f"• **แนวรับ L1:** `{sup1['price']:,.2f}` [{sup1['label']}] (ห่าง `{dist_to_sup_pct:.2f}%` | **Setup Score: {sup1['setup_score']}/100**)\n"
+                    f"• **แผนบริหารความเสี่ยง:** TP `{res1['price']:,.2f}` | SL `{data['raw_sl']:,.2f}` (**R:R = 1:{data['raw_rr']:.1f}**)\n"
+                    f"• **กลยุทธ์:** {data['action_note']}"
+                )
+                try:
+                    requests.post(DISCORD_WEBHOOK_URL, json={"content": msg}, timeout=10)
+                except Exception as e:
+                    print(f"Discord post error: {e}")
+
+        # เงื่อนไขที่ 2: ราคาพุ่งเข้าใกล้แนวต้าน L1 ในระยะ <= 1.5% (เตือนระวังแรงเทขาย / จุดทำกำไร)
+        elif 0 <= dist_to_res_pct <= 1.5 and res1["setup_score"] >= 68:
+            key = f"{sym}_RES"
+            if now_ts - discord_alert_cooldown.get(key, 0) > cooldown_sec:
+                discord_alert_cooldown[key] = now_ts
+                msg = (
+                    f"🔴 **[Target / Supply Alert] ราคาเข้าใกล้โซนแนวต้านสำคัญ!**\n"
+                    f"• **สินทรัพย์:** `{data['symbol']}` | **ราคาล่าสุด:** `{data['price_str']}` ({data['change_str']})\n"
+                    f"• **โครงสร้าง:** {data['structure']} | **RSI:** `{data['raw_rsi']:.1f}`\n"
+                    f"• **แนวต้าน L1:** `{res1['price']:,.2f}` [{res1['label']}] (ห่าง `{dist_to_res_pct:.2f}%` | **ความแข็งแกร่งต้าน: {res1['setup_score']}/100**)\n"
+                    f"• **แนวรับอ้างอิงด้านล่าง:** `{sup1['price']:,.2f}` [{sup1['label']}]"
+                )
+                try:
+                    requests.post(DISCORD_WEBHOOK_URL, json={"content": msg}, timeout=10)
+                except Exception as e:
+                    print(f"Discord post error: {e}")
+
+# 8. สร้างการ์ด Flex Message สำหรับ LINE OA
 def build_flex_card(data):
     tf_badge = f" ({data['interval']})" if data['interval'] != "1D" else ""
     bubble_dict = {
@@ -652,9 +709,24 @@ def build_flex_card(data):
         contents=FlexContainer.from_dict(bubble_dict)
     )
 
+# Endpoint สำหรับ UptimeRobot: ปลุกเซิร์ฟเวอร์ + สั่งสแกนแจ้งเตือนเข้า Discord เบื้องหลังทุกๆ 30 นาที
 @app.route("/", methods=['GET'])
 def health_check():
-    return "Stock Sage AI (LEORIO SMC + Quant Risk Edition) is Awake!", 200
+    global last_auto_scan_time
+    now_ts = time.time()
+    # หากผ่านไปเกิน 30 นาที (1800 วินาที) ให้รันสแกนส่ง Discord ใน Background Thread ทันที
+    if DISCORD_WEBHOOK_URL and (now_ts - last_auto_scan_time > 1800):
+        last_auto_scan_time = now_ts
+        threading.Thread(target=scan_and_notify_discord, daemon=True).start()
+    return "Stock Sage AI (LINE Interactive + Discord Auto-Alert) is Awake!", 200
+
+# Endpoint พิเศษเผื่อต้องการกดรันสแกนเข้า Discord ทันทีผ่านเบราว์เซอร์
+@app.route("/scan_discord", methods=['GET'])
+def manual_discord_trigger():
+    if not DISCORD_WEBHOOK_URL:
+        return "⚠️ ยังไม่ได้ตั้งค่า DISCORD_WEBHOOK_URL ใน Environment ของ Render", 400
+    threading.Thread(target=scan_and_notify_discord, daemon=True).start()
+    return "✅ สั่งรันสแกนหุ้นเข้าแนวรับ-แนวต้านส่งไปยัง Discord เรียบร้อยแล้ว!", 200
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -680,12 +752,12 @@ def handle_message(event):
 
     if command == "/HELP":
         help_text = (
-            "📖 **คู่มือ Stock Sage AI (LEORIO SMC + Quant Edition)**\n\n"
-            "• พิมพ์ชื่อหุ้น (เช่น `NVDA`, `GOOGL`, `PTT.BK`) ดูโครงสร้าง **BOS / CHOCH**, โซน **Demand / Supply / OB / FVG / Hidden Base** และแผน TP/SL\n"
-            "• พิมพ์ชื่อหุ้นตามด้วย TF (เช่น `NVDA H1` หรือ `GC=F M15`) เพื่อสแกนโซนระยะสั้น\n"
+            "📖 **คู่มือ Stock Sage AI (Hybrid LINE + Discord)**\n\n"
+            "• **ใน LINE (ฟรีไม่จำกัด):** พิมพ์ชื่อหุ้น (เช่น `NVDA`, `PTT.BK`, `NVDA H1`) เพื่อดูการ์ดแผนเทรดได้ตลอดเวลา\n"
+            "• **ใน Discord (แจ้งเตือนอัตโนมัติ):** ระบบจะส่งแจ้งเตือนเข้าห้อง Discord เองเมื่อมีหุ้นวิ่งเข้าใกล้แนวรับหรือแนวต้านสำคัญ\n\n"
             "• `+[ชื่อหุ้น]` เพิ่มเข้า Watchlist / `-[ชื่อหุ้น]` ลบออก\n"
             "• `/LIST` ดูรายชื่อหุ้นเฝ้าระวัง\n"
-            "• `/SUMMARY` สรุปโครงสร้างตลาดและแนวรับของพอร์ตทั้งหมด\n"
+            "• `/SUMMARY` สรุปโครงสร้างตลาดและแนวรับของพอร์ต\n"
             "• `/SCAN_SUPPORT` สแกนหาหุ้นที่เข้าใกล้โซนรับสำคัญ"
         )
         messages_to_reply.append(TextMessage(text=help_text))
@@ -714,11 +786,11 @@ def handle_message(event):
 
     elif command == "/SCAN_SUPPORT":
         high_score_setups = []
-        for sym in GLOBAL_SCAN_POOL[:12]: # สแกน 12 ตัวหลักเพื่อป้องกัน Timeout บน Render
+        for sym in GLOBAL_SCAN_POOL[:12]:
             d = get_pro_stock_data(sym, "1d")
             if d:
                 score_num = int(d['setup_score'].split('/')[0])
-                if score_num >= 70:
+                if score_num >= 68:
                     high_score_setups.append((score_num, d))
         high_score_setups.sort(key=lambda x: -x[0])
 
@@ -743,7 +815,7 @@ def handle_message(event):
                 actual_sym = check['symbol']
                 if actual_sym not in watchlist:
                     watchlist.append(actual_sym)
-                    messages_to_reply.append(TextMessage(text=f"✅ เพิ่ม **{actual_sym}** ({check['price_str']}) เข้า Watchlist แล้ว"))
+                    messages_to_reply.append(TextMessage(text=f"✅ เพิ่ม **{actual_sym}** ({check['price_str']}) เข้า Watchlist แล้ว (ระบบจะเฝ้าแจ้งเตือนเข้า Discord ให้ด้วย)"))
                 else:
                     messages_to_reply.append(TextMessage(text=f"⚠️ หุ้น **{actual_sym}** มีอยู่ใน Watchlist แล้ว"))
             else:
@@ -761,7 +833,6 @@ def handle_message(event):
             messages_to_reply.append(TextMessage(text=f"⚠️ ไม่พบ **{stock_to_remove}** ใน Watchlist"))
 
     else:
-        # รองรับการพิมพ์ชื่อหุ้นพร้อม Timeframe เช่น "NVDA H1" หรือ "NVDA M15"
         parts = command.split()
         stock_name = parts[0]
         tf = "1d"
