@@ -31,11 +31,10 @@ DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL', '')
 
 # หน่วยความจำเก็บ Watchlist และระบบกันแจ้งเตือนซ้ำใน Discord
 user_watchlists = {}
-discord_alert_cooldown = {}  # { "SYMBOL_ZONE": timestamp }
+discord_alert_cooldown = {}
 last_auto_scan_time = 0
 PERF_LOG_FILE = "weekly_performance_log.csv"
 
-# คลังหุ้นชั้นนำสำหรับสแกนเข้า Discord อัตโนมัติ
 GLOBAL_SCAN_POOL = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AVGO", "AMD", "NFLX",
     "QQQM", "SCHG", "JEPQ", "VOO", "RKLB", "PLTR", "COIN", "UBER", "CRM", "COST"
@@ -102,9 +101,8 @@ def evaluate_weekly_performance():
                 continue
             week_str, symbol, start_p, sup_l1, res_l1, score, act_low, act_high, status, note = row
 
-            # ประเมินเฉพาะรายการที่ค้างอยู่และข้ามสัปดาห์มาแล้ว หรือทดสอบย้อนหลัง 5 วันทำการ
             if status == "PENDING" and week_str != current_week:
-                df = fetch_clean_history(symbol, period="14d", interval="1d")
+                df = fetch_clean_history(symbol, period="1mo", interval="1d")
                 time.sleep(1.0)
                 if not df.empty and len(df) >= 5:
                     recent_low = float(df['Low'].iloc[-5:].min())
@@ -149,24 +147,48 @@ def evaluate_weekly_performance():
     )
 
 # ==========================================
-# ส่วนที่ 2: ดึงข้อมูลและคำนวณอินดิเคเตอร์
+# ส่วนที่ 2: ดึงข้อมูลผ่าน Yahoo Chart API v8 (แก้ 401/429 ถาวร)
 # ==========================================
 def fetch_clean_history(symbol, period="1y", interval="1d"):
     symbol = symbol.upper().strip()
     df = pd.DataFrame()
 
-    # ใช้ yf.download เป็นหลักเพื่อลดปัญหา Invalid Crumb จาก Ticker.history
-    try:
-        df = yf.download(symbol, period=period, interval=interval, progress=False, auto_adjust=True)
-    except Exception as e:
-        print(f"yf.download failed for {symbol}: {e}")
+    # แปลงช่วงเวลาให้ตรงกับมาตรฐาน Yahoo Chart API v8
+    range_map = {"60d": "1mo", "14d": "1mo", "1y": "1y", "1mo": "1mo"}
+    api_range = range_map.get(period, period)
 
+    # วิธีที่ 1 (หลัก): ยิงตรงเข้า Yahoo Chart API v8 ไม่ต้องใช้ Crumb
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        params = {"range": api_range, "interval": interval}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        }
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            payload = resp.json()
+            result_list = payload.get("chart", {}).get("result")
+            if result_list:
+                res = result_list[0]
+                timestamps = res.get("timestamp", [])
+                quote = res.get("indicators", {}).get("quote", [{}])[0]
+                if timestamps and quote:
+                    df = pd.DataFrame({
+                        "Open": quote.get("open", []),
+                        "High": quote.get("high", []),
+                        "Low": quote.get("low", []),
+                        "Close": quote.get("close", []),
+                        "Volume": quote.get("volume", [])
+                    }, index=pd.to_datetime(timestamps, unit="s"))
+    except Exception as e:
+        print(f"Direct Chart API failed for {symbol}: {e}")
+
+    # วิธีที่ 2 (สำรอง): ใช้ yfinance หากวิธีแรกดึงไม่ได้
     if df is None or df.empty:
         try:
-            ticker_obj = yf.Ticker(symbol)
-            df = ticker_obj.history(period=period, interval=interval, auto_adjust=True)
+            df = yf.download(symbol, period=period, interval=interval, progress=False, auto_adjust=True)
         except Exception as e:
-            print(f"Ticker.history failed for {symbol}: {e}")
+            print(f"yf.download fallback failed for {symbol}: {e}")
 
     if df is None or df.empty:
         return pd.DataFrame()
@@ -186,17 +208,6 @@ def fetch_clean_history(symbol, period="1y", interval="1d"):
         df['Volume'] = df['Volume'].fillna(0)
 
     return df
-
-def get_upcoming_earnings(symbol):
-    try:
-        ticker = yf.Ticker(symbol)
-        cal = ticker.calendar
-        if isinstance(cal, dict) and 'Earnings Date' in cal and cal['Earnings Date']:
-            next_date = pd.to_datetime(cal['Earnings Date'][0]).strftime('%Y-%m-%d')
-            return f"📅 งบออก: {next_date}"
-    except Exception:
-        pass
-    return "📅 งบ: ยังไม่ระบุ"
 
 def calculate_wilder_rsi(close_series, period=14):
     delta = close_series.diff()
@@ -427,10 +438,10 @@ def build_confluence_zones(candidates, current_price, atr_val, is_support=True, 
 # ==========================================
 # ส่วนที่ 3: วิเคราะห์หุ้นรายตัว
 # ==========================================
-def get_pro_stock_data(symbol, interval="1d", fetch_earnings=True):
+def get_pro_stock_data(symbol, interval="1d"):
     try:
         symbol = symbol.upper().strip()
-        period = "60d" if interval in ["15m", "1h"] else "1y"
+        period = "1mo" if interval in ["15m", "1h"] else "1y"
         df = fetch_clean_history(symbol, period=period, interval=interval)
 
         if (df is None or len(df) < 15) and "." not in symbol:
@@ -525,12 +536,7 @@ def get_pro_stock_data(symbol, interval="1d", fetch_earnings=True):
         rr_ratio = reward / risk
 
         max_score = int(max(s['setup_score'] for s in sup_zones[:3]))
-        if interval == "1d" and fetch_earnings:
-            earnings_info = get_upcoming_earnings(symbol)
-        else:
-            earnings_info = f"⏱️ TF: {interval.upper()}"
 
-        # บันทึกสถิติรายสัปดาห์อัตโนมัติสำหรับ Timeframe 1d
         if interval == "1d":
             log_weekly_setup(symbol, current_price, sup_zones[0]['price'], res_zones[0]['price'], sup_zones[0]['setup_score'])
 
@@ -561,7 +567,7 @@ def get_pro_stock_data(symbol, interval="1d", fetch_earnings=True):
             "rsi_str": f"{rsi_val:.1f} ({' | '.join(mom_tags)})",
             "structure": smc["structure"],
             "action_note": smc["action_note"],
-            "ema_poc_str": f"EMA50: {ema_50:,.2f} | EMA200: {ema_200:,.2f} | {earnings_info}",
+            "ema_poc_str": f"EMA50: {ema_50:,.2f} | EMA200: {ema_200:,.2f} | POC: {poc_price:,.2f}",
             "supports": [
                 f"{sup_zones[0]['price']:,.2f} [Score {sup_zones[0]['setup_score']}] • {sup_zones[0]['label']}",
                 f"{sup_zones[1]['price']:,.2f} [Score {sup_zones[1]['setup_score']}] • {sup_zones[1]['label']}",
@@ -583,7 +589,7 @@ def get_pro_stock_data(symbol, interval="1d", fetch_earnings=True):
         return None
 
 # ==========================================
-# ส่วนที่ 4: สแกนและแจ้งเตือนเข้า Discord (กันโดนบล็อก 429/401)
+# ส่วนที่ 4: สแกนและแจ้งเตือนเข้า Discord
 # ==========================================
 def scan_and_notify_discord():
     if not DISCORD_WEBHOOK_URL:
@@ -599,9 +605,8 @@ def scan_and_notify_discord():
     cooldown_sec = 6 * 3600
 
     for sym in all_symbols[:20]:
-        # ปิด fetch_earnings เพื่อไม่ให้เรียก ticker.calendar และเว้นระยะ 2.5 วินาทีกัน Yahoo บล็อก
-        data = get_pro_stock_data(sym, interval="1d", fetch_earnings=False)
-        time.sleep(2.5)
+        data = get_pro_stock_data(sym, interval="1d")
+        time.sleep(2.0)
         if not data:
             continue
 
@@ -826,7 +831,7 @@ def health_check():
     if DISCORD_WEBHOOK_URL and (now_ts - last_auto_scan_time > 1800):
         last_auto_scan_time = now_ts
         threading.Thread(target=scan_and_notify_discord, daemon=True).start()
-    return "Stock Sage AI (LINE Interactive + Discord Auto-Alert + Weekly Audit) is Awake!", 200
+    return "Stock Sage AI (Chart API v8 + Discord Auto-Alert + Weekly Audit) is Awake!", 200
 
 @app.route("/scan_discord", methods=['GET'])
 def manual_discord_trigger():
@@ -886,7 +891,7 @@ def handle_message(event):
         else:
             summary_lines = [f"📊 **สรุปโครงสร้าง & โซนรับพอร์ต ({len(watchlist)} ตัว):**"]
             for sym in watchlist:
-                d = get_pro_stock_data(sym, "1d", fetch_earnings=False)
+                d = get_pro_stock_data(sym, "1d")
                 if d:
                     summary_lines.append(
                         f"\n🔹 **{d['symbol']}** : {d['price_str']} ({d['change_str']})\n"
@@ -898,7 +903,7 @@ def handle_message(event):
     elif command == "/SCAN_SUPPORT":
         high_score_setups = []
         for sym in GLOBAL_SCAN_POOL[:10]:
-            d = get_pro_stock_data(sym, "1d", fetch_earnings=False)
+            d = get_pro_stock_data(sym, "1d")
             if d:
                 score_num = int(d['setup_score'].split('/')[0])
                 if score_num >= 68:
@@ -921,11 +926,50 @@ def handle_message(event):
     elif user_message.startswith("+"):
         stock_to_add = user_message[1:].strip().upper()
         if stock_to_add:
-            check = get_pro_stock_data(stock_to_add, fetch_earnings=False)
+            check = get_pro_stock_data(stock_to_add)
             if check:
                 actual_sym = check['symbol']
                 if actual_sym not in watchlist:
                     watchlist.append(actual_sym)
                     messages_to_reply.append(TextMessage(text=f"✅ เพิ่ม **{actual_sym}** ({check['price_str']}) เข้า Watchlist แล้ว"))
                 else:
-                    messages_to_reply.append(TextMessage
+                    messages_to_reply.append(TextMessage(text=f"⚠️ หุ้น **{actual_sym}** มีอยู่ใน Watchlist แล้ว"))
+            else:
+                messages_to_reply.append(TextMessage(text=f"⚠️ ไม่พบข้อมูลหุ้น '{stock_to_add}'"))
+
+    elif user_message.startswith("-"):
+        stock_to_remove = user_message[1:].strip().upper()
+        if stock_to_remove in watchlist:
+            watchlist.remove(stock_to_remove)
+            messages_to_reply.append(TextMessage(text=f"🗑️ ลบ **{stock_to_remove}** ออกจาก Watchlist แล้ว"))
+        elif f"{stock_to_remove}.BK" in watchlist:
+            watchlist.remove(f"{stock_to_remove}.BK")
+            messages_to_reply.append(TextMessage(text=f"🗑️ ลบ **{stock_to_remove}.BK** ออกจาก Watchlist แล้ว"))
+        else:
+            messages_to_reply.append(TextMessage(text=f"⚠️ ไม่พบ **{stock_to_remove}** ใน Watchlist"))
+
+    else:
+        parts = command.split()
+        stock_name = parts[0]
+        tf = "1d"
+        if len(parts) > 1:
+            if parts[1] in ["M15", "15M"]: tf = "15m"
+            elif parts[1] in ["H1", "1H", "60M"]: tf = "1h"
+
+        data = get_pro_stock_data(stock_name, interval=tf)
+        if data:
+            messages_to_reply.append(build_flex_card(data))
+        else:
+            messages_to_reply.append(TextMessage(text=f"⚠️ ไม่พบข้อมูลหุ้น '{stock_name}'\n(พิมพ์ชื่อหุ้น เช่น NVDA, PTT.BK หรือระบุ TF เช่น NVDA H1)"))
+
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        line_bot_api.reply_message_with_http_info(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=messages_to_reply
+            )
+        )
+
+if __name__ == "__main__":
+    app.run(port=5000)
