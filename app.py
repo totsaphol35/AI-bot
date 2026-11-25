@@ -89,7 +89,7 @@ def evaluate_weekly_performance_from_sheets():
 
         data = resp.json().get("rows", [])
         if len(data) <= 1:
-            return "📭 ยังไม่มีข้อมูลบันทึกสถิติใน Google Sheets"
+            return "📭 ยังไม่มีข้อมูลบันทึกสถิติในฐานข้อมูล Axion"
 
         rows = data[1:]
         total_tp_trades = 0
@@ -198,7 +198,7 @@ def evaluate_weekly_performance_from_sheets():
         win_rate = (total_tp_trades / total_closed_trades * 100) if total_closed_trades > 0 else 0.0
 
         return (
-            f"📊 **สรุปผล Multi-TP / SL รายสัปดาห์ (Google Sheets Audit)**\n"
+            f"📊 **Axion Quant • รายงานสรุปผล Multi-TP / SL**\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"🟢 **จำนวนไม้ที่ทำกำไร (TP รวม):** `{total_tp_trades} ไม้`\n"
             f"   ├ ชนเป้า TP1: `{tp1_hits}` ครั้ง\n"
@@ -208,7 +208,7 @@ def evaluate_weekly_performance_from_sheets():
             f"━━━━━━━━━━━━━━━━━━\n"
             f"🏆 **อัตราชนะรายไม้ (Trade Win Rate):** **{win_rate:.1f}%**\n"
             f"⏳ **รอปิดรอบสัปดาห์ (PENDING):** `{pending_count}` รายการ\n"
-            f"📈 *ดูข้อมูลรายตัวแบบละเอียดได้ใน Google Sheets ของคุณ*"
+            f"📈 *ตรวจสอบข้อมูลรายตัวแบบละเอียดได้ใน Google Sheets*"
         )
     except Exception as e:
         return f"⚠️ เกิดข้อผิดพลาดในการประเมินผล: {str(e)}"
@@ -603,7 +603,7 @@ def scan_and_notify_discord():
             if now_ts - discord_alert_cooldown.get(key, 0) > 6 * 3600:
                 discord_alert_cooldown[key] = now_ts
                 msg = (
-                    f"🟢 **[Stock Sage AI Alert] ราคาหุ้น `{data['symbol']}` เข้าโซนรับสำคัญ!**\n"
+                    f"🟢 **[Axion Quant Alert] ราคาหุ้น `{data['symbol']}` เข้าโซนรับสำคัญ!**\n"
                     f"• ราคา: `{data['price_str']}`\n"
                     f"• แนวรับ L1: `{sup1['price']:,.2f}` [{sup1['label']}] (Score: {sup1['setup_score']}/100)\n"
                     f"• แผนเทรด: {data['setup_str']}"
@@ -623,7 +623,8 @@ def build_flex_card(data):
             "backgroundColor": "#0F0F1E",
             "paddingAll": "16px",
             "contents": [
-                {"type": "text", "text": f"📊 {data['symbol']}", "weight": "bold", "size": "xl", "color": "#FFFFFF"},
+                {"type": "text", "text": "AXION QUANT ENGINE", "size": "xxs", "color": "#00D26A", "weight": "bold"},
+                {"type": "text", "text": f"📊 {data['symbol']}", "weight": "bold", "size": "xl", "color": "#FFFFFF", "margin": "xs"},
                 {"type": "text", "text": f"{data['price_str']} ({data['change_str']})", "size": "lg", "weight": "bold", "color": data['change_color'], "margin": "sm"}
             ]
         },
@@ -644,7 +645,7 @@ def build_flex_card(data):
         }
     }
     return FlexMessage(
-        alt_text=f"วิเคราะห์ {data['symbol']}",
+        alt_text=f"Axion วิเคราะห์ {data['symbol']}",
         contents=FlexContainer.from_dict(bubble_dict),
         quick_reply=get_quick_reply_buttons(data['symbol'])
     )
@@ -658,14 +659,14 @@ def health_check():
     if DISCORD_WEBHOOK_URL and (now_ts - last_auto_scan_time > 1800):
         last_auto_scan_time = now_ts
         threading.Thread(target=scan_and_notify_discord, daemon=True).start()
-    return "Stock Sage AI (Institutional Multi-TP/SL + Quick Reply Edition) is Awake!", 200
+    return "Axion Quant Engine (Institutional Multi-TP/SL + Quick Reply) is Awake!", 200
 
 @app.route("/scan_discord", methods=['GET'])
 def manual_discord_trigger():
     if not DISCORD_WEBHOOK_URL:
         return "⚠️ ยังไม่ได้ตั้งค่า DISCORD_WEBHOOK_URL", 400
     threading.Thread(target=scan_and_notify_discord, daemon=True).start()
-    return "✅ สั่งรันสแกนหุ้นส่งเข้า Discord เรียบร้อยแล้ว!", 200
+    return "✅ Axion สั่งรันสแกนหุ้นส่งเข้า Discord เรียบร้อยแล้ว!", 200
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -692,7 +693,7 @@ def handle_message(event):
 
     if command in ["/HELP", "HELP"]:
         help_text = (
-            "📖 **คู่มือ Stock Sage AI**\n\n"
+            "📖 **คู่มือการใช้งาน Axion Quant**\n\n"
             "• พิมพ์ชื่อหุ้น (เช่น `NVDA`, `PTT.BK`, `NVDA H1`) ดูการ์ดแผนเทรด 3 ไม้\n"
             "• `/WEEKLY_PERF` ตรวจสรุปยอด TP/SL รายสัปดาห์จาก Google Sheets\n"
             "• `+[ชื่อหุ้น]` / `-[ชื่อหุ้น]` จัดการ Watchlist\n"
@@ -710,13 +711,13 @@ def handle_message(event):
             messages_to_reply.append(TextMessage(text="📭 Watchlist ว่างเปล่า พิมพ์ +ตามด้วยชื่อหุ้นเพื่อเพิ่ม", quick_reply=default_qr))
         else:
             list_str = "\n".join([f"{i+1}. {s}" for i, s in enumerate(watchlist)])
-            messages_to_reply.append(TextMessage(text=f"📋 **Watchlist ของคุณ ({len(watchlist)} ตัว):**\n{list_str}", quick_reply=default_qr))
+            messages_to_reply.append(TextMessage(text=f"📋 **Axion Watchlist ({len(watchlist)} ตัว):**\n{list_str}", quick_reply=default_qr))
 
     elif command in ["/SUMMARY", "SUMMARY"]:
         if not watchlist:
             messages_to_reply.append(TextMessage(text="📭 Watchlist ว่างเปล่าครับ", quick_reply=default_qr))
         else:
-            summary_lines = ["📊 **สรุปโครงสร้างพอร์ต:**"]
+            summary_lines = ["📊 **Axion สรุปโครงสร้างพอร์ต:**"]
             for sym in watchlist:
                 d = get_pro_stock_data(sym, "1d")
                 if d:
@@ -730,7 +731,7 @@ def handle_message(event):
             if d and int(d['setup_score'].split('/')[0]) >= 68:
                 setups.append(d)
         if setups:
-            lines = ["🎯 **หุ้นที่เข้าโซนรับเด่น:**"]
+            lines = ["🎯 **Axion คัดหุ้นเข้าโซนรับเด่น:**"]
             for s in setups[:5]:
                 lines.append(f"\n🏆 **{s['symbol']}** ({s['price_str']})\n   • {s['supports'][0]}")
             messages_to_reply.append(TextMessage(text="\n".join(lines), quick_reply=default_qr))
@@ -743,7 +744,7 @@ def handle_message(event):
         if chk:
             if chk['symbol'] not in watchlist:
                 watchlist.append(chk['symbol'])
-            messages_to_reply.append(TextMessage(text=f"✅ เพิ่ม **{chk['symbol']}** เข้า Watchlist แล้ว", quick_reply=default_qr))
+            messages_to_reply.append(TextMessage(text=f"✅ เพิ่ม **{chk['symbol']}** เข้า Watchlist ของ Axion แล้ว", quick_reply=default_qr))
         else:
             messages_to_reply.append(TextMessage(text=f"⚠️ ไม่พบข้อมูลหุ้น '{add_sym}'", quick_reply=default_qr))
 
