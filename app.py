@@ -17,7 +17,10 @@ from linebot.v3.messaging import (
     ReplyMessageRequest,
     TextMessage,
     FlexMessage,
-    FlexContainer
+    FlexContainer,
+    QuickReply,
+    QuickReplyItem,
+    MessageAction
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
@@ -37,6 +40,21 @@ GLOBAL_SCAN_POOL = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AVGO", "AMD", "NFLX",
     "QQQM", "SCHG", "JEPQ", "VOO", "RKLB", "PLTR", "COIN", "UBER", "CRM", "COST"
 ]
+
+# ==========================================
+# สร้างชุดปุ่มกดด่วน (Quick Reply Buttons)
+# ==========================================
+def get_quick_reply_buttons(symbol=None):
+    items = [
+        QuickReplyItem(action=MessageAction(label="📊 สรุปพอร์ต", text="/SUMMARY")),
+        QuickReplyItem(action=MessageAction(label="🎯 สแกนโซนรับ", text="/SCAN_SUPPORT")),
+        QuickReplyItem(action=MessageAction(label="📋 Watchlist", text="/LIST")),
+        QuickReplyItem(action=MessageAction(label="🏆 สถิติ TP/SL", text="/WEEKLY_PERF")),
+    ]
+    if symbol:
+        items.insert(0, QuickReplyItem(action=MessageAction(label=f"➕ เก็บ {symbol}", text=f"+{symbol}")))
+        items.insert(1, QuickReplyItem(action=MessageAction(label=f"⏱️ {symbol} H1", text=f"{symbol} H1")))
+    return QuickReply(items=items[:13])
 
 # ==========================================
 # ส่วนที่ 1: Auditor Agent (บันทึกและตรวจวัดผล Multi-TP / SL)
@@ -104,9 +122,7 @@ def evaluate_weekly_performance_from_sheets():
                     tp_c = 0
                     sl_c = 0
 
-                    # ตรวจสอบว่าราคาลงมาแตะจุดเข้า Entry หรือไม่ (ในรัศมี 1.0%)
                     if recent_low <= e_val * 1.010:
-                        # เช็กทีละแท่งเทียนเพื่อลำดับเหตุการณ์จริง (โดน SL ก่อนหรือวิ่งขึ้น TP)
                         triggered = False
                         stopped_out = False
                         for _, bar in recent_df.iterrows():
@@ -117,7 +133,6 @@ def evaluate_weekly_performance_from_sheets():
                             if triggered and not stopped_out:
                                 if b_low <= sl_val:
                                     stopped_out = True
-                                    # ไม้ที่ยังไม่ถึง TP จะโดน SL
                                     sl_c = max(0, 3 - tp_c)
                                     break
                                 if b_high >= tp1_val and tp_c < 1:
@@ -380,7 +395,6 @@ def build_confluence_zones(candidates, current_price, atr_val, is_support=True, 
     valid_candidates = [c for c in candidates if (0 < c['price'] <= current_price if is_support else c['price'] >= current_price) and not np.isnan(c['price'])]
     valid_candidates.sort(key=lambda x: x['price'], reverse=is_support)
     clusters = []
-    # ใช้ ATR Adaptive Merge Radius (0.4 * ATR) เพื่อความแม่นยำตามความผันผวนจริงของหุ้นแต่ละตัว
     dynamic_merge = max((0.4 * atr_val) / max(current_price, 0.0001), 0.008)
 
     for item in valid_candidates:
@@ -508,13 +522,10 @@ def get_pro_stock_data(symbol, interval="1d"):
         sup_zones = build_confluence_zones(raw_supports, current_price, atr_val, True, rsi_val, rvol, macd_turning_up, is_uptrend, smc["is_bullish_shift"])
         res_zones = build_confluence_zones(raw_resistances, current_price, atr_val, False, rsi_val, rvol, macd_turning_up, is_uptrend, smc["is_bullish_shift"])
 
-        # ลอจิกคำนวณแผนแบ่งไม้ 3 ระดับ (Institutional Multi-Tier Setup)
         best_entry = sup_zones[0]['price']
-        # ตั้ง SL เผื่อระยะสะบัดกวาด Liquidity 1.35 เท่าของ ATR
         risk_unit = max(1.35 * atr_val, best_entry * 0.015)
         stop_loss = best_entry - risk_unit
 
-        # เป้า TP1 = 1.5R (เก็บกำไรไว), TP2 = แนวต้านโครงสร้าง L1, TP3 = แนวต้านโครงสร้าง L2
         tp1 = max(best_entry + (1.5 * risk_unit), res_zones[0]['price'] * 0.995)
         tp2 = max(tp1 + (1.0 * risk_unit), res_zones[1]['price'])
         tp3 = max(tp2 + (1.5 * risk_unit), res_zones[2]['price'])
@@ -632,7 +643,11 @@ def build_flex_card(data):
             ]
         }
     }
-    return FlexMessage(alt_text=f"วิเคราะห์ {data['symbol']}", contents=FlexContainer.from_dict(bubble_dict))
+    return FlexMessage(
+        alt_text=f"วิเคราะห์ {data['symbol']}",
+        contents=FlexContainer.from_dict(bubble_dict),
+        quick_reply=get_quick_reply_buttons(data['symbol'])
+    )
 
 @app.route("/", methods=['GET', 'HEAD'])
 def health_check():
@@ -643,7 +658,7 @@ def health_check():
     if DISCORD_WEBHOOK_URL and (now_ts - last_auto_scan_time > 1800):
         last_auto_scan_time = now_ts
         threading.Thread(target=scan_and_notify_discord, daemon=True).start()
-    return "Stock Sage AI (Institutional Multi-TP/SL Audit Edition) is Awake!", 200
+    return "Stock Sage AI (Institutional Multi-TP/SL + Quick Reply Edition) is Awake!", 200
 
 @app.route("/scan_discord", methods=['GET'])
 def manual_discord_trigger():
@@ -673,6 +688,7 @@ def handle_message(event):
 
     watchlist = user_watchlists[user_id]
     messages_to_reply = []
+    default_qr = get_quick_reply_buttons()
 
     if command in ["/HELP", "HELP"]:
         help_text = (
@@ -683,29 +699,29 @@ def handle_message(event):
             "• `/SUMMARY` สรุปพอร์ต | `/SCAN_SUPPORT` สแกนหาโซนรับ\n"
             "• `/LIST` ดูรายชื่อหุ้นใน Watchlist"
         )
-        messages_to_reply.append(TextMessage(text=help_text))
+        messages_to_reply.append(TextMessage(text=help_text, quick_reply=default_qr))
 
     elif command in ["/WEEKLY_PERF", "WEEKLY_PERF"]:
         report = evaluate_weekly_performance_from_sheets()
-        messages_to_reply.append(TextMessage(text=report))
+        messages_to_reply.append(TextMessage(text=report, quick_reply=default_qr))
 
     elif command in ["/LIST", "LIST"]:
         if not watchlist:
-            messages_to_reply.append(TextMessage(text="📭 Watchlist ว่างเปล่า พิมพ์ +ตามด้วยชื่อหุ้นเพื่อเพิ่ม"))
+            messages_to_reply.append(TextMessage(text="📭 Watchlist ว่างเปล่า พิมพ์ +ตามด้วยชื่อหุ้นเพื่อเพิ่ม", quick_reply=default_qr))
         else:
             list_str = "\n".join([f"{i+1}. {s}" for i, s in enumerate(watchlist)])
-            messages_to_reply.append(TextMessage(text=f"📋 **Watchlist ของคุณ ({len(watchlist)} ตัว):**\n{list_str}"))
+            messages_to_reply.append(TextMessage(text=f"📋 **Watchlist ของคุณ ({len(watchlist)} ตัว):**\n{list_str}", quick_reply=default_qr))
 
     elif command in ["/SUMMARY", "SUMMARY"]:
         if not watchlist:
-            messages_to_reply.append(TextMessage(text="📭 Watchlist ว่างเปล่าครับ"))
+            messages_to_reply.append(TextMessage(text="📭 Watchlist ว่างเปล่าครับ", quick_reply=default_qr))
         else:
             summary_lines = ["📊 **สรุปโครงสร้างพอร์ต:**"]
             for sym in watchlist:
                 d = get_pro_stock_data(sym, "1d")
                 if d:
                     summary_lines.append(f"\n🔹 **{d['symbol']}** : {d['price_str']}\n   └ รับ: {d['supports'][0]}")
-            messages_to_reply.append(TextMessage(text="\n".join(summary_lines)))
+            messages_to_reply.append(TextMessage(text="\n".join(summary_lines), quick_reply=default_qr))
 
     elif command in ["/SCAN_SUPPORT", "SCAN_SUPPORT"]:
         setups = []
@@ -717,9 +733,9 @@ def handle_message(event):
             lines = ["🎯 **หุ้นที่เข้าโซนรับเด่น:**"]
             for s in setups[:5]:
                 lines.append(f"\n🏆 **{s['symbol']}** ({s['price_str']})\n   • {s['supports'][0]}")
-            messages_to_reply.append(TextMessage(text="\n".join(lines)))
+            messages_to_reply.append(TextMessage(text="\n".join(lines), quick_reply=default_qr))
         else:
-            messages_to_reply.append(TextMessage(text="🛡️ ยังไม่มีหุ้นตัวหลักเข้าโซนรับในรอบนี้"))
+            messages_to_reply.append(TextMessage(text="🛡️ ยังไม่มีหุ้นตัวหลักเข้าโซนรับในรอบนี้", quick_reply=default_qr))
 
     elif user_message.startswith("+"):
         add_sym = user_message[1:].strip().upper()
@@ -727,9 +743,9 @@ def handle_message(event):
         if chk:
             if chk['symbol'] not in watchlist:
                 watchlist.append(chk['symbol'])
-            messages_to_reply.append(TextMessage(text=f"✅ เพิ่ม **{chk['symbol']}** เข้า Watchlist แล้ว"))
+            messages_to_reply.append(TextMessage(text=f"✅ เพิ่ม **{chk['symbol']}** เข้า Watchlist แล้ว", quick_reply=default_qr))
         else:
-            messages_to_reply.append(TextMessage(text=f"⚠️ ไม่พบข้อมูลหุ้น '{add_sym}'"))
+            messages_to_reply.append(TextMessage(text=f"⚠️ ไม่พบข้อมูลหุ้น '{add_sym}'", quick_reply=default_qr))
 
     elif user_message.startswith("-"):
         rem_sym = user_message[1:].strip().upper()
@@ -737,7 +753,7 @@ def handle_message(event):
             watchlist.remove(rem_sym)
         elif f"{rem_sym}.BK" in watchlist:
             watchlist.remove(f"{rem_sym}.BK")
-        messages_to_reply.append(TextMessage(text=f"🗑️ ลบ **{rem_sym}** ออกจาก Watchlist แล้ว"))
+        messages_to_reply.append(TextMessage(text=f"🗑️ ลบ **{rem_sym}** ออกจาก Watchlist แล้ว", quick_reply=default_qr))
 
     else:
         parts = command.split()
@@ -752,7 +768,7 @@ def handle_message(event):
         if data:
             messages_to_reply.append(build_flex_card(data))
         else:
-            messages_to_reply.append(TextMessage(text=f"⚠️ ไม่พบข้อมูลหุ้น '{stock_name}'"))
+            messages_to_reply.append(TextMessage(text=f"⚠️ ไม่พบข้อมูลหุ้น '{stock_name}'", quick_reply=default_qr))
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
