@@ -39,9 +39,9 @@ GLOBAL_SCAN_POOL = [
 ]
 
 # ==========================================
-# ส่วนที่ 1: Auditor Agent (จัดการ Google Sheets)
+# ส่วนที่ 1: Auditor Agent (บันทึกและตรวจวัดผล Multi-TP / SL)
 # ==========================================
-def log_weekly_setup_to_sheets(symbol, price, support_l1, resistance_l1, score):
+def log_weekly_setup_to_sheets(symbol, entry, tp1, tp2, tp3, sl, score):
     if not GOOGLE_SHEET_WEBHOOK_URL:
         return
     week_str = datetime.now().strftime("%Y-W%U")
@@ -49,10 +49,12 @@ def log_weekly_setup_to_sheets(symbol, price, support_l1, resistance_l1, score):
         "action": "log",
         "week": week_str,
         "symbol": symbol,
-        "start_price": f"{price:.2f}",
-        "support_l1": f"{support_l1:.2f}",
-        "resistance_l1": f"{resistance_l1:.2f}",
-        "setup_score": score
+        "entry": f"{entry:.2f}",
+        "tp1": f"{tp1:.2f}",
+        "tp2": f"{tp2:.2f}",
+        "tp3": f"{tp3:.2f}",
+        "sl": f"{sl:.2f}",
+        "score": score
     }
     try:
         requests.post(GOOGLE_SHEET_WEBHOOK_URL, json=payload, timeout=5)
@@ -72,34 +74,74 @@ def evaluate_weekly_performance_from_sheets():
             return "📭 ยังไม่มีข้อมูลบันทึกสถิติใน Google Sheets"
 
         rows = data[1:]
-        wins = 0
-        total_evaluated = 0
+        total_tp_trades = 0
+        total_sl_trades = 0
+        tp1_hits = 0
+        tp2_hits = 0
+        tp3_hits = 0
+        pending_count = 0
         current_week = datetime.now().strftime("%Y-W%U")
 
         for row in rows:
-            if len(row) < 10:
+            if len(row) < 14:
                 continue
-            week_str, symbol, start_p, sup_l1, res_l1, score, act_low, act_high, status, note = row
+            week_str, symbol, entry_s, tp1_s, tp2_s, tp3_s, sl_s, score, act_low, act_high, tp_cnt_s, sl_cnt_s, status, note = row
 
             if status == "PENDING" and week_str != current_week:
                 df = fetch_clean_history(symbol, period="1mo", interval="1d")
                 time.sleep(1.0)
                 if not df.empty and len(df) >= 5:
-                    recent_low = float(df['Low'].iloc[-5:].min())
-                    recent_high = float(df['High'].iloc[-5:].max())
-                    curr_close = float(df['Close'].iloc[-1])
-                    s_val = float(sup_l1)
+                    recent_df = df.iloc[-5:]
+                    recent_low = float(recent_df['Low'].min())
+                    recent_high = float(recent_df['High'].max())
 
-                    if recent_low <= s_val * 1.015:
-                        if curr_close >= s_val:
-                            status = "WIN"
-                            note = f"แตะรับ {s_val:.2f} แล้วดีดกลับ (Low {recent_low:.2f})"
+                    e_val = float(entry_s)
+                    tp1_val = float(tp1_s)
+                    tp2_val = float(tp2_s)
+                    tp3_val = float(tp3_s)
+                    sl_val = float(sl_s)
+
+                    tp_c = 0
+                    sl_c = 0
+
+                    # ตรวจสอบว่าราคาลงมาแตะจุดเข้า Entry หรือไม่ (ในรัศมี 1.0%)
+                    if recent_low <= e_val * 1.010:
+                        # เช็กทีละแท่งเทียนเพื่อลำดับเหตุการณ์จริง (โดน SL ก่อนหรือวิ่งขึ้น TP)
+                        triggered = False
+                        stopped_out = False
+                        for _, bar in recent_df.iterrows():
+                            b_low = float(bar['Low'])
+                            b_high = float(bar['High'])
+                            if not triggered and b_low <= e_val * 1.010:
+                                triggered = True
+                            if triggered and not stopped_out:
+                                if b_low <= sl_val:
+                                    stopped_out = True
+                                    # ไม้ที่ยังไม่ถึง TP จะโดน SL
+                                    sl_c = max(0, 3 - tp_c)
+                                    break
+                                if b_high >= tp1_val and tp_c < 1:
+                                    tp_c = 1
+                                if b_high >= tp2_val and tp_c < 2:
+                                    tp_c = 2
+                                if b_high >= tp3_val and tp_c < 3:
+                                    tp_c = 3
+
+                        if tp_c > 0 and sl_c == 0:
+                            status = f"WIN (TP{tp_c})"
+                            note = f"เข้าออเดอร์ {e_val:.2f} -> ชน TP {tp_c} ไม้ (High {recent_high:.2f})"
+                        elif tp_c > 0 and sl_c > 0:
+                            status = f"PARTIAL (TP{tp_c}/SL{sl_c})"
+                            note = f"เก็บกำไร TP {tp_c} ไม้ ก่อนย่อโดน SL {sl_c} ไม้"
+                        elif sl_c > 0:
+                            status = "LOSS (SL 3)"
+                            note = f"เข้าออเดอร์ {e_val:.2f} -> หลุดโดน SL ทั้ง 3 ไม้ (Low {recent_low:.2f})"
                         else:
-                            status = "LOSS"
-                            note = f"หลุดรับ {s_val:.2f} (Low {recent_low:.2f})"
+                            status = "HOLDING"
+                            note = f"เข้าออเดอร์แล้ว ยังไม่ถึง TP1/SL (Low {recent_low:.2f}, High {recent_high:.2f})"
                     else:
                         status = "NO_TOUCH"
-                        note = "ราคายังไม่ลงมาทดสอบแนวรับ"
+                        note = f"ราคาไม่ย่อถึงจุดเข้า {e_val:.2f} (Low {recent_low:.2f})"
 
                     update_payload = {
                         "action": "update",
@@ -107,6 +149,8 @@ def evaluate_weekly_performance_from_sheets():
                         "symbol": symbol,
                         "actual_low": f"{recent_low:.2f}",
                         "actual_high": f"{recent_high:.2f}",
+                        "tp_count": tp_c,
+                        "sl_count": sl_c,
                         "status": status,
                         "note": note
                     }
@@ -115,26 +159,47 @@ def evaluate_weekly_performance_from_sheets():
                     except Exception:
                         pass
 
-            if status in ["WIN", "LOSS"]:
-                total_evaluated += 1
-                if status == "WIN":
-                    wins += 1
+                    tp_cnt_s = tp_c
+                    sl_cnt_s = sl_c
 
-        hit_rate = (wins / total_evaluated * 100) if total_evaluated > 0 else 0.0
-        pending_count = sum(1 for r in rows if len(r) >= 9 and r[8] == "PENDING")
+            if status == "PENDING":
+                pending_count += 1
+            else:
+                try:
+                    t_c = int(tp_cnt_s)
+                    s_c = int(sl_cnt_s)
+                    total_tp_trades += t_c
+                    total_sl_trades += s_c
+                    if t_c >= 1:
+                        tp1_hits += 1
+                    if t_c >= 2:
+                        tp2_hits += 1
+                    if t_c >= 3:
+                        tp3_hits += 1
+                except Exception:
+                    pass
+
+        total_closed_trades = total_tp_trades + total_sl_trades
+        win_rate = (total_tp_trades / total_closed_trades * 100) if total_closed_trades > 0 else 0.0
+
         return (
-            f"📊 **รายงานประสิทธิภาพแนวรับจริง (Google Sheets Audit)**\n"
-            f"• ประเมินผลแล้ว: {total_evaluated} รายการ\n"
-            f"• แนวรับรับอยู่ (WIN): {wins} ครั้ง\n"
-            f"• อัตราความแม่นยำจริง (Hit Rate): **{hit_rate:.1f}%**\n"
-            f"• รอปิดสัปดาห์ (PENDING): {pending_count} รายการ\n"
-            f"📈 *ตรวจสอบตารางสถิติฉบับเต็มได้โดยตรงใน Google Sheets ของคุณ*"
+            f"📊 **สรุปผล Multi-TP / SL รายสัปดาห์ (Google Sheets Audit)**\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🟢 **จำนวนไม้ที่ทำกำไร (TP รวม):** `{total_tp_trades} ไม้`\n"
+            f"   ├ ชนเป้า TP1: `{tp1_hits}` ครั้ง\n"
+            f"   ├ ชนเป้า TP2: `{tp2_hits}` ครั้ง\n"
+            f"   └ ชนเป้า TP3: `{tp3_hits}` ครั้ง\n"
+            f"🔴 **จำนวนไม้ที่ตัดขาดทุน (SL รวม):** `{total_sl_trades} ไม้`\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🏆 **อัตราชนะรายไม้ (Trade Win Rate):** **{win_rate:.1f}%**\n"
+            f"⏳ **รอปิดรอบสัปดาห์ (PENDING):** `{pending_count}` รายการ\n"
+            f"📈 *ดูข้อมูลรายตัวแบบละเอียดได้ใน Google Sheets ของคุณ*"
         )
     except Exception as e:
         return f"⚠️ เกิดข้อผิดพลาดในการประเมินผล: {str(e)}"
 
 # ==========================================
-# ส่วนที่ 2: Data & Quant Engine (Yahoo Chart API v8)
+# ส่วนที่ 2: Data & Institutional Quant Engine
 # ==========================================
 def fetch_clean_history(symbol, period="1y", interval="1d"):
     symbol = symbol.upper().strip()
@@ -251,7 +316,6 @@ def analyze_leorio_smc(df, atr_val, ema_200):
         "bear_ob": None,
         "bull_fvg": None,
         "bear_fvg": None,
-        "hidden_base": None,
         "action_note": "รอราคาเข้าโซนสำคัญ"
     }
     if len(df) < 30:
@@ -293,16 +357,36 @@ def analyze_leorio_smc(df, atr_val, ema_200):
         if smc["supply_zone"] and smc["bear_ob"]:
             break
 
+    for i in range(len(df) - 1, max(len(df) - 30, 2), -1):
+        if lows[i] > highs[i - 2] and (lows[i] - highs[i - 2]) >= 0.15 * atr_val:
+            if smc["bull_fvg"] is None and curr_price >= highs[i - 2]:
+                smc["bull_fvg"] = float((lows[i] + highs[i - 2]) / 2.0)
+        if highs[i] < lows[i - 2] and (lows[i - 2] - highs[i]) >= 0.15 * atr_val:
+            if smc["bear_fvg"] is None and curr_price <= lows[i - 2]:
+                smc["bear_fvg"] = float((lows[i - 2] + highs[i]) / 2.0)
+
+    if smc["liquidity_sweep"] and smc["is_bullish_shift"]:
+        smc["action_note"] = "✅ Sweep + BOS/CHOCH ครบ! รอย่อรับ OB/FVG"
+    elif smc["liquidity_sweep"]:
+        smc["action_note"] = "⚡ กวาด Liquidity ล่างแล้ว รอแท่งยืนยันกลับตัว"
+    elif smc["is_bullish_shift"]:
+        smc["action_note"] = "📈 โครงสร้างขาขึ้นแข็งแกร่ง รอย่อเข้าโซน Demand/OB"
+    else:
+        smc["action_note"] = "🛡️ เน้นตั้งรับโซนลึก หลีกเลี่ยงไล่ราคา"
+
     return smc
 
 def build_confluence_zones(candidates, current_price, atr_val, is_support=True, rsi_val=50, rvol=1.0, macd_turning_up=False, is_uptrend=True, has_bull_shift=False):
     valid_candidates = [c for c in candidates if (0 < c['price'] <= current_price if is_support else c['price'] >= current_price) and not np.isnan(c['price'])]
     valid_candidates.sort(key=lambda x: x['price'], reverse=is_support)
     clusters = []
+    # ใช้ ATR Adaptive Merge Radius (0.4 * ATR) เพื่อความแม่นยำตามความผันผวนจริงของหุ้นแต่ละตัว
+    dynamic_merge = max((0.4 * atr_val) / max(current_price, 0.0001), 0.008)
+
     for item in valid_candidates:
         placed = False
         for cluster in clusters:
-            if abs(cluster['price'] - item['price']) / max(current_price, 0.0001) <= 0.010:
+            if abs(cluster['price'] - item['price']) / max(current_price, 0.0001) <= dynamic_merge:
                 total_w = cluster['weight'] + item['weight']
                 cluster['price'] = (cluster['price'] * cluster['weight'] + item['price'] * item['weight']) / total_w
                 cluster['weight'] = total_w
@@ -351,7 +435,7 @@ def build_confluence_zones(candidates, current_price, atr_val, is_support=True, 
     return results[:3]
 
 # ==========================================
-# ส่วนที่ 3: วิเคราะห์หุ้นรายตัว
+# ส่วนที่ 3: วิเคราะห์หุ้นรายตัวและสร้างแผน Multi-TP / SL
 # ==========================================
 def get_pro_stock_data(symbol, interval="1d"):
     try:
@@ -402,6 +486,8 @@ def get_pro_stock_data(symbol, interval="1d"):
             raw_supports.append({'price': smc["demand_zone"], 'label': 'Demand Zone 🟢', 'weight': 15})
         if smc["bull_ob"] and smc["bull_ob"] < current_price:
             raw_supports.append({'price': smc["bull_ob"], 'label': 'Bullish OB 📦', 'weight': 16})
+        if smc["bull_fvg"] and smc["bull_fvg"] < current_price:
+            raw_supports.append({'price': smc["bull_fvg"], 'label': 'Bullish FVG ⚡', 'weight': 14})
 
         raw_resistances = [
             {'price': current_price + 1.8 * atr_val, 'label': 'ATR Target', 'weight': 9},
@@ -416,18 +502,28 @@ def get_pro_stock_data(symbol, interval="1d"):
             raw_resistances.append({'price': smc["supply_zone"], 'label': 'Supply Zone 🔴', 'weight': 15})
         if smc["bear_ob"] and smc["bear_ob"] > current_price:
             raw_resistances.append({'price': smc["bear_ob"], 'label': 'Bearish OB 📦', 'weight': 16})
+        if smc["bear_fvg"] and smc["bear_fvg"] > current_price:
+            raw_resistances.append({'price': smc["bear_fvg"], 'label': 'Bearish FVG ⚡', 'weight': 14})
 
         sup_zones = build_confluence_zones(raw_supports, current_price, atr_val, True, rsi_val, rvol, macd_turning_up, is_uptrend, smc["is_bullish_shift"])
         res_zones = build_confluence_zones(raw_resistances, current_price, atr_val, False, rsi_val, rvol, macd_turning_up, is_uptrend, smc["is_bullish_shift"])
 
+        # ลอจิกคำนวณแผนแบ่งไม้ 3 ระดับ (Institutional Multi-Tier Setup)
         best_entry = sup_zones[0]['price']
-        stop_loss = best_entry - (1.2 * atr_val)
-        take_profit = res_zones[0]['price']
-        rr_ratio = max(take_profit - best_entry, 0.01) / max(best_entry - stop_loss, 0.01)
+        # ตั้ง SL เผื่อระยะสะบัดกวาด Liquidity 1.35 เท่าของ ATR
+        risk_unit = max(1.35 * atr_val, best_entry * 0.015)
+        stop_loss = best_entry - risk_unit
+
+        # เป้า TP1 = 1.5R (เก็บกำไรไว), TP2 = แนวต้านโครงสร้าง L1, TP3 = แนวต้านโครงสร้าง L2
+        tp1 = max(best_entry + (1.5 * risk_unit), res_zones[0]['price'] * 0.995)
+        tp2 = max(tp1 + (1.0 * risk_unit), res_zones[1]['price'])
+        tp3 = max(tp2 + (1.5 * risk_unit), res_zones[2]['price'])
+
+        rr_ratio = (tp2 - best_entry) / max(best_entry - stop_loss, 0.01)
         max_score = int(max(s['setup_score'] for s in sup_zones[:3]))
 
         if interval == "1d":
-            log_weekly_setup_to_sheets(symbol, current_price, sup_zones[0]['price'], res_zones[0]['price'], sup_zones[0]['setup_score'])
+            log_weekly_setup_to_sheets(symbol, best_entry, tp1, tp2, tp3, stop_loss, sup_zones[0]['setup_score'])
 
         currency = "THB" if ".BK" in symbol else "USD"
         change_sign = "+" if price_change >= 0 else ""
@@ -462,8 +558,8 @@ def get_pro_stock_data(symbol, interval="1d"):
             ],
             "setup_str": (
                 f"• จุดรอรับ (Entry): {best_entry:,.2f} ({sup_zones[0]['label']})\n"
-                f"• เป้าทำกำไร (TP): {take_profit:,.2f} | ตัดขาดทุน (SL): {stop_loss:,.2f}\n"
-                f"• Risk/Reward (R:R): 1 : {rr_ratio:.1f} | {smc['action_note']}"
+                f"• เป้าทำกำไร (3 ไม้): TP1: {tp1:,.2f} | TP2: {tp2:,.2f} | TP3: {tp3:,.2f}\n"
+                f"• ตัดขาดทุน (SL): {stop_loss:,.2f} (R:R เฉลี่ย 1:{rr_ratio:.1f})"
             )
         }
     except Exception as e:
@@ -498,7 +594,8 @@ def scan_and_notify_discord():
                 msg = (
                     f"🟢 **[Stock Sage AI Alert] ราคาหุ้น `{data['symbol']}` เข้าโซนรับสำคัญ!**\n"
                     f"• ราคา: `{data['price_str']}`\n"
-                    f"• แนวรับ L1: `{sup1['price']:,.2f}` [{sup1['label']}] (Score: {sup1['setup_score']}/100)"
+                    f"• แนวรับ L1: `{sup1['price']:,.2f}` [{sup1['label']}] (Score: {sup1['setup_score']}/100)\n"
+                    f"• แผนเทรด: {data['setup_str']}"
                 )
                 try:
                     requests.post(DISCORD_WEBHOOK_URL, json={"content": msg}, timeout=10)
@@ -527,10 +624,10 @@ def build_flex_card(data):
                 {"type": "text", "text": f"🏛️ โครงสร้างตลาด: {data['structure']}", "size": "xs", "weight": "bold", "wrap": True},
                 {"type": "text", "text": f"📈 RSI: {data['rsi_str']}", "size": "xs", "margin": "xs"},
                 {"type": "separator", "margin": "md"},
-                {"type": "text", "text": "🟢 โซนรับหลัก (Demand / OB):", "size": "sm", "weight": "bold", "color": "#008000", "margin": "md"},
+                {"type": "text", "text": "🟢 โซนรับหลัก (Demand / OB / FVG):", "size": "sm", "weight": "bold", "color": "#008000", "margin": "md"},
                 {"type": "text", "text": f"1. {data['supports'][0]}\n2. {data['supports'][1]}", "size": "xs", "wrap": True},
                 {"type": "separator", "margin": "md"},
-                {"type": "text", "text": "💡 แผนเทรด & ความเสี่ยง:", "size": "xs", "weight": "bold", "margin": "md"},
+                {"type": "text", "text": "💡 แผนเทรดแบ่ง 3 ไม้ & ความเสี่ยง:", "size": "xs", "weight": "bold", "margin": "md"},
                 {"type": "text", "text": data['setup_str'], "size": "xxs", "wrap": True}
             ]
         }
@@ -546,7 +643,7 @@ def health_check():
     if DISCORD_WEBHOOK_URL and (now_ts - last_auto_scan_time > 1800):
         last_auto_scan_time = now_ts
         threading.Thread(target=scan_and_notify_discord, daemon=True).start()
-    return "Stock Sage AI (Multi-Agent Google Sheets Edition) is Awake!", 200
+    return "Stock Sage AI (Institutional Multi-TP/SL Audit Edition) is Awake!", 200
 
 @app.route("/scan_discord", methods=['GET'])
 def manual_discord_trigger():
@@ -580,8 +677,8 @@ def handle_message(event):
     if command in ["/HELP", "HELP"]:
         help_text = (
             "📖 **คู่มือ Stock Sage AI**\n\n"
-            "• พิมพ์ชื่อหุ้น (เช่น `NVDA`, `PTT.BK`, `NVDA H1`) ดูการ์ดแผนเทรด\n"
-            "• `/WEEKLY_PERF` ตรวจรายงานความแม่นยำจริงจาก Google Sheets\n"
+            "• พิมพ์ชื่อหุ้น (เช่น `NVDA`, `PTT.BK`, `NVDA H1`) ดูการ์ดแผนเทรด 3 ไม้\n"
+            "• `/WEEKLY_PERF` ตรวจสรุปยอด TP/SL รายสัปดาห์จาก Google Sheets\n"
             "• `+[ชื่อหุ้น]` / `-[ชื่อหุ้น]` จัดการ Watchlist\n"
             "• `/SUMMARY` สรุปพอร์ต | `/SCAN_SUPPORT` สแกนหาโซนรับ\n"
             "• `/LIST` ดูรายชื่อหุ้นใน Watchlist"
