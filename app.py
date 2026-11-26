@@ -32,29 +32,38 @@ handler = WebhookHandler(os.getenv('LINE_CHANNEL_SECRET', 'YOUR_CHANNEL_SECRET')
 DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL', '')
 GOOGLE_SHEET_WEBHOOK_URL = os.getenv('GOOGLE_SHEET_WEBHOOK_URL', '')
 
+# Watchlist เริ่มต้นถาวรทุกครั้งที่อัปเดตหรือรีสตาร์ทระบบ
+DEFAULT_WATCHLIST = ["SCHG", "JEPQ", "QQQ", "RKLB"]
 user_watchlists = {}
 discord_alert_cooldown = {}
 last_auto_scan_time = 0
 
 GLOBAL_SCAN_POOL = [
-    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AVGO", "AMD", "NFLX",
-    "QQQM", "SCHG", "JEPQ", "VOO", "RKLB", "PLTR", "COIN", "UBER", "CRM", "COST"
+    "SCHG", "JEPQ", "QQQ", "RKLB",
+    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AVGO", "AMD", "QCOM",
+    "QQQM", "VOO", "PLTR", "COIN", "UBER", "COST"
 ]
 
 # ==========================================
-# สร้างชุดปุ่มกดด่วน (Quick Reply Buttons)
+# สร้างชุดปุ่มกดด่วนแบบกระชับ (พอดีหน้าจอ LINE)
 # ==========================================
 def get_quick_reply_buttons(symbol=None):
-    items = [
-        QuickReplyItem(action=MessageAction(label="📊 สรุปพอร์ต", text="/SUMMARY")),
-        QuickReplyItem(action=MessageAction(label="🎯 สแกนโซนรับ", text="/SCAN_SUPPORT")),
-        QuickReplyItem(action=MessageAction(label="📋 Watchlist", text="/LIST")),
-        QuickReplyItem(action=MessageAction(label="🏆 สถิติ TP/SL", text="/WEEKLY_PERF")),
-    ]
     if symbol:
-        items.insert(0, QuickReplyItem(action=MessageAction(label=f"➕ เก็บ {symbol}", text=f"+{symbol}")))
-        items.insert(1, QuickReplyItem(action=MessageAction(label=f"⏱️ {symbol} H1", text=f"{symbol} H1")))
-    return QuickReply(items=items[:13])
+        short_sym = symbol.replace(".BK", "")[:6]
+        items = [
+            QuickReplyItem(action=MessageAction(label=f"➕ {short_sym}", text=f"+{symbol}")),
+            QuickReplyItem(action=MessageAction(label=f"⏱️ {short_sym} H1", text=f"{symbol} H1")),
+            QuickReplyItem(action=MessageAction(label="📊 พอร์ต", text="/SUMMARY")),
+            QuickReplyItem(action=MessageAction(label="📋 ลิสต์", text="/LIST")),
+        ]
+    else:
+        items = [
+            QuickReplyItem(action=MessageAction(label="📊 พอร์ต", text="/SUMMARY")),
+            QuickReplyItem(action=MessageAction(label="🎯 สแกน", text="/SCAN_SUPPORT")),
+            QuickReplyItem(action=MessageAction(label="📋 ลิสต์", text="/LIST")),
+            QuickReplyItem(action=MessageAction(label="🏆 TP/SL", text="/WEEKLY_PERF")),
+        ]
+    return QuickReply(items=items)
 
 # ==========================================
 # ส่วนที่ 1: Auditor Agent (บันทึกและตรวจวัดผล Multi-TP / SL)
@@ -198,23 +207,22 @@ def evaluate_weekly_performance_from_sheets():
         win_rate = (total_tp_trades / total_closed_trades * 100) if total_closed_trades > 0 else 0.0
 
         return (
-            f"📊 **Axion Quant • รายงานสรุปผล Multi-TP / SL**\n"
+            f"📊 Axion Quant • รายงานสรุปผล Multi-TP / SL\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"🟢 **จำนวนไม้ที่ทำกำไร (TP รวม):** `{total_tp_trades} ไม้`\n"
-            f"   ├ ชนเป้า TP1: `{tp1_hits}` ครั้ง\n"
-            f"   ├ ชนเป้า TP2: `{tp2_hits}` ครั้ง\n"
-            f"   └ ชนเป้า TP3: `{tp3_hits}` ครั้ง\n"
-            f"🔴 **จำนวนไม้ที่ตัดขาดทุน (SL รวม):** `{total_sl_trades} ไม้`\n"
+            f"🟢 จำนวนไม้ที่ทำกำไร (TP รวม): {total_tp_trades} ไม้\n"
+            f"   ├ ชนเป้า TP1: {tp1_hits} ครั้ง\n"
+            f"   ├ ชนเป้า TP2: {tp2_hits} ครั้ง\n"
+            f"   └ ชนเป้า TP3: {tp3_hits} ครั้ง\n"
+            f"🔴 จำนวนไม้ที่ตัดขาดทุน (SL รวม): {total_sl_trades} ไม้\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"🏆 **อัตราชนะรายไม้ (Trade Win Rate):** **{win_rate:.1f}%**\n"
-            f"⏳ **รอปิดรอบสัปดาห์ (PENDING):** `{pending_count}` รายการ\n"
-            f"📈 *ตรวจสอบข้อมูลรายตัวแบบละเอียดได้ใน Google Sheets*"
+            f"🏆 อัตราชนะรายไม้ (Win Rate): {win_rate:.1f}%\n"
+            f"⏳ รอปิดรอบสัปดาห์ (PENDING): {pending_count} รายการ"
         )
     except Exception as e:
         return f"⚠️ เกิดข้อผิดพลาดในการประเมินผล: {str(e)}"
 
 # ==========================================
-# ส่วนที่ 2: Data & Institutional Quant Engine
+# ส่วนที่ 2: Data, Fair Value & Multi-Timeframe Engine
 # ==========================================
 def fetch_clean_history(symbol, period="1y", interval="1d"):
     symbol = symbol.upper().strip()
@@ -272,12 +280,79 @@ def fetch_clean_history(symbol, period="1y", interval="1d"):
 
     return df
 
+def fetch_fundamentals_and_meta(symbol, current_price, ema_200):
+    meta = {
+        "company_name": symbol,
+        "exchange": "SET" if ".BK" in symbol else "US",
+        "currency": "THB" if ".BK" in symbol else "USD",
+        "currency_sym": "฿" if ".BK" in symbol else "$",
+        "fair_value": None,
+        "fv_note": "Model Est.",
+        "after_hours": None
+    }
+    try:
+        ticker = yf.Ticker(symbol)
+        info = ticker.info or {}
+        if info.get("shortName"):
+            meta["company_name"] = str(info["shortName"])[:24]
+        if info.get("exchange"):
+            ex = str(info["exchange"])
+            ex_map = {"NMS": "NASDAQ", "NYQ": "NYSE", "PCX": "NYSE Arca", "BKK": "SET"}
+            meta["exchange"] = ex_map.get(ex, ex)
+        if info.get("currency"):
+            meta["currency"] = str(info["currency"])
+            meta["currency_sym"] = "฿" if meta["currency"] == "THB" else "$"
+
+        post_p = info.get("postMarketPrice")
+        if post_p and float(post_p) > 0:
+            meta["after_hours"] = float(post_p)
+
+        # คำนวณ Fair Value จากหลายโมเดลพื้นฐาน
+        models = []
+        target_mean = info.get("targetMeanPrice")
+        if target_mean and float(target_mean) > 0:
+            models.append(float(target_mean))
+
+        fwd_eps = info.get("forwardEps")
+        if fwd_eps and float(fwd_eps) > 0:
+            models.append(float(fwd_eps) * 20.0)
+
+        trailing_eps = info.get("trailingEps")
+        book_val = info.get("bookValue")
+        if trailing_eps and book_val and float(trailing_eps) > 0 and float(book_val) > 0:
+            graham = float(np.sqrt(22.5 * float(trailing_eps) * float(book_val)))
+            if 0.3 * current_price <= graham <= 3.0 * current_price:
+                models.append(graham)
+
+        if models:
+            meta["fair_value"] = float(np.mean(models))
+            meta["fv_note"] = "Fundamental"
+        else:
+            # สำหรับ ETF (เช่น SCHG, JEPQ, QQQ) ใช้ NAV หรือค่ากลางโครงสร้าง
+            nav = info.get("navPrice")
+            if nav and float(nav) > 0:
+                meta["fair_value"] = float(nav)
+                meta["fv_note"] = "ETF NAV"
+            elif ema_200 > 0:
+                meta["fair_value"] = float((current_price * 0.6) + (ema_200 * 0.45))
+                meta["fv_note"] = "Quant Est."
+    except Exception as e:
+        print(f"Meta fetch fallback for {symbol}: {e}")
+        if ema_200 > 0:
+            meta["fair_value"] = float((current_price * 0.6) + (ema_200 * 0.45))
+            meta["fv_note"] = "Quant Est."
+
+    return meta
+
 def calculate_wilder_rsi(close_series, period=14):
+    if len(close_series) < 3:
+        return 50.0
+    p = min(period, max(len(close_series) - 1, 2))
     delta = close_series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    avg_gain = gain.ewm(alpha=1/p, min_periods=1, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/p, min_periods=1, adjust=False).mean()
     last_gain = float(avg_gain.iloc[-1])
     last_loss = float(avg_loss.iloc[-1])
     if last_loss == 0:
@@ -320,6 +395,90 @@ def calculate_volume_poc(df, bins=25):
     max_bin = int(np.argmax(vol_by_bin))
     return float((bin_edges[max_bin] + bin_edges[max_bin + 1]) / 2.0)
 
+def aggregate_ohlc(df, mode="weekly"):
+    if df is None or df.empty:
+        return pd.DataFrame()
+    temp = df.copy()
+    if mode == "weekly":
+        iso = temp.index.isocalendar()
+        temp['_grp'] = iso.year.astype(str) + "-" + iso.week.astype(str).str.zfill(2)
+    else:
+        temp['_grp'] = temp.index.strftime("%Y-%m")
+    agg = temp.groupby('_grp', sort=True).agg({
+        'Open': 'first',
+        'High': 'max',
+        'Low': 'min',
+        'Close': 'last',
+        'Volume': 'sum'
+    })
+    return agg
+
+def score_timeframe_trend(df_tf):
+    if df_tf is None or len(df_tf) < 4:
+        return {"dir": "รอข้อมูล", "color": "#64748B", "conf": "—", "score": 0}
+    closes = df_tf['Close']
+    curr = float(closes.iloc[-1])
+    ema_fast = float(closes.ewm(span=min(8, len(closes)), adjust=False).mean().iloc[-1])
+    ema_slow = float(closes.ewm(span=min(21, len(closes)), adjust=False).mean().iloc[-1])
+    rsi = calculate_wilder_rsi(closes, 14)
+
+    pts = 0
+    if curr > ema_fast:
+        pts += 1
+    else:
+        pts -= 1
+    if ema_fast > ema_slow:
+        pts += 1
+    else:
+        pts -= 1
+    if rsi >= 55:
+        pts += 1
+    elif rsi <= 45:
+        pts -= 1
+    if len(closes) >= 2 and float(closes.iloc[-1]) > float(closes.iloc[-2]):
+        pts += 1
+    else:
+        pts -= 1
+
+    conf_val = min(max(int(55 + abs(pts) * 9), 52), 92)
+    if pts >= 3:
+        return {"dir": "ขาขึ้นแข็งแกร่ง ↗", "color": "#059669", "conf": f"{conf_val}%", "score": 2}
+    elif pts >= 1:
+        return {"dir": "แนวโน้มขึ้น ↗", "color": "#10B981", "conf": f"{conf_val}%", "score": 1}
+    elif pts <= -3:
+        return {"dir": "ขาลงชัดเจน ↘", "color": "#DC2626", "conf": f"{conf_val}%", "score": -2}
+    elif pts <= -1:
+        return {"dir": "อ่อนแรง/ย่อตัว ↘", "color": "#EF4444", "conf": f"{conf_val}%", "score": -1}
+    return {"dir": "พักตัว Sideway →", "color": "#D97706", "conf": "55%", "score": 0}
+
+def compute_mtf_forecast(df_1d, current_price, ema_200, fair_value):
+    daily_res = score_timeframe_trend(df_1d.tail(60))
+    weekly_df = aggregate_ohlc(df_1d, "weekly")
+    monthly_df = aggregate_ohlc(df_1d, "monthly")
+    weekly_res = score_timeframe_trend(weekly_df)
+    monthly_res = score_timeframe_trend(monthly_df)
+
+    # Yearly อิงจาก Fair Value + โครงสร้าง EMA 200
+    upside = ((fair_value - current_price) / current_price * 100) if (fair_value and current_price > 0) else 0.0
+    above_200 = current_price >= ema_200
+    if upside >= 10 and above_200:
+        yearly_res = {"dir": "เติบโต/น่าสะสม ↗", "color": "#059669", "conf": "84%", "score": 2}
+    elif upside >= 5 or above_200:
+        yearly_res = {"dir": "แนวโน้มบวก ↗", "color": "#10B981", "conf": "72%", "score": 1}
+    elif upside <= -10 and not above_200:
+        yearly_res = {"dir": "แพงกว่ามูลค่า ↘", "color": "#DC2626", "conf": "78%", "score": -2}
+    elif upside <= -5:
+        yearly_res = {"dir": "ระวังแรงขาย ↘", "color": "#EF4444", "conf": "66%", "score": -1}
+    else:
+        yearly_res = {"dir": "สมดุล/ถือต่อ →", "color": "#D97706", "conf": "60%", "score": 0}
+
+    return {
+        "Daily": daily_res,
+        "Weekly": weekly_res,
+        "Monthly": monthly_res,
+        "Yearly": yearly_res
+    }
+
 def analyze_leorio_smc(df, atr_val, ema_200):
     smc = {
         "structure": "Sideway / รอเลือกทาง",
@@ -344,12 +503,12 @@ def analyze_leorio_smc(df, atr_val, ema_200):
     prev_swing_low = float(np.min(lows[-25:-5]))
 
     if curr_price > prev_swing_high:
-        smc["structure"] = "BOS ขาขึ้น (เบรกโครงสร้างไปต่อ ↗️)" if curr_price >= ema_200 else "CHOCH ขาขึ้น (สัญญาณกลับตัวแรก 🔄)"
+        smc["structure"] = "BOS ขาขึ้น" if curr_price >= ema_200 else "CHOCH ขาขึ้น"
         smc["is_bullish_shift"] = True
     elif curr_price < prev_swing_low:
-        smc["structure"] = "BOS ขาลง (หลุดโครงสร้างลงต่อ ↘️)" if curr_price < ema_200 else "CHOCH ขาลง (เตือนเสียทรงขาขึ้น ⚠️)"
+        smc["structure"] = "BOS ขาลง" if curr_price < ema_200 else "CHOCH ขาลง"
     else:
-        smc["structure"] = "ย่อพักตัวในกรอบโครงสร้าง (Pullback)"
+        smc["structure"] = "Pullback ในกรอบ"
 
     if any((l < prev_swing_low and c > prev_swing_low) for l, c in zip(lows[-5:], closes[-5:])):
         smc["liquidity_sweep"] = True
@@ -379,15 +538,6 @@ def analyze_leorio_smc(df, atr_val, ema_200):
         if highs[i] < lows[i - 2] and (lows[i - 2] - highs[i]) >= 0.15 * atr_val:
             if smc["bear_fvg"] is None and curr_price <= lows[i - 2]:
                 smc["bear_fvg"] = float((lows[i - 2] + highs[i]) / 2.0)
-
-    if smc["liquidity_sweep"] and smc["is_bullish_shift"]:
-        smc["action_note"] = "✅ Sweep + BOS/CHOCH ครบ! รอย่อรับ OB/FVG"
-    elif smc["liquidity_sweep"]:
-        smc["action_note"] = "⚡ กวาด Liquidity ล่างแล้ว รอแท่งยืนยันกลับตัว"
-    elif smc["is_bullish_shift"]:
-        smc["action_note"] = "📈 โครงสร้างขาขึ้นแข็งแกร่ง รอย่อเข้าโซน Demand/OB"
-    else:
-        smc["action_note"] = "🛡️ เน้นตั้งรับโซนลึก หลีกเลี่ยงไล่ราคา"
 
     return smc
 
@@ -437,8 +587,8 @@ def build_confluence_zones(candidates, current_price, atr_val, is_support=True, 
 
     results.sort(key=lambda x: x['price'], reverse=is_support)
     step = max(atr_val, current_price * 0.015)
-    fallback_sup = ["ATR Demand Zone", "Volatility Support", "Deep Structural Bid"]
-    fallback_res = ["ATR Supply Zone", "Volatility Target", "Extended Target"]
+    fallback_sup = ["ATR Support", "Volatility Support", "Deep Bid"]
+    fallback_res = ["ATR Target", "Volatility Target", "Extended Target"]
 
     while len(results) < 3:
         idx = len(results)
@@ -451,7 +601,7 @@ def build_confluence_zones(candidates, current_price, atr_val, is_support=True, 
 # ==========================================
 # ส่วนที่ 3: วิเคราะห์หุ้นรายตัวและสร้างแผน Multi-TP / SL
 # ==========================================
-def get_pro_stock_data(symbol, interval="1d"):
+def get_pro_stock_data(symbol, interval="1d", include_meta=True):
     try:
         symbol = symbol.upper().strip()
         period = "1mo" if interval in ["15m", "1h"] else "1y"
@@ -465,9 +615,19 @@ def get_pro_stock_data(symbol, interval="1d"):
         if df is None or len(df) < 15:
             return None
 
+        # ดึงกราฟรายวัน 1 ปี สำหรับคำนวณ Multi-Timeframe Forecast
+        df_daily = df if interval == "1d" else fetch_clean_history(symbol, period="1y", interval="1d")
+        if df_daily is None or df_daily.empty:
+            df_daily = df
+
         current_price = float(df['Close'].iloc[-1])
         prev_close = float(df['Close'].iloc[-2]) if len(df) >= 2 else current_price
         price_change = ((current_price - prev_close) / prev_close) * 100 if prev_close > 0 else 0.0
+
+        day_low = float(df_daily['Low'].iloc[-1])
+        day_high = float(df_daily['High'].iloc[-1])
+        w52_low = float(df_daily['Low'].min())
+        w52_high = float(df_daily['High'].max())
 
         rsi_val = calculate_wilder_rsi(df['Close'], 14)
         atr_val = calculate_atr(df, 14)
@@ -487,37 +647,33 @@ def get_pro_stock_data(symbol, interval="1d"):
         smc = analyze_leorio_smc(df, atr_val, ema_200)
         is_uptrend = current_price >= ema_200
 
-        raw_supports = [
-            {'price': current_price - 1.8 * atr_val, 'label': 'ATR Support', 'weight': 9},
-        ]
+        raw_supports = [{'price': current_price - 1.8 * atr_val, 'label': 'ATR Support', 'weight': 9}]
         if ema_50 < current_price:
             raw_supports.append({'price': ema_50, 'label': 'EMA 50', 'weight': 10})
         if ema_200 < current_price:
-            raw_supports.append({'price': ema_200, 'label': 'EMA 200 🛡️', 'weight': 16})
+            raw_supports.append({'price': ema_200, 'label': 'EMA 200', 'weight': 16})
         if poc_price < current_price:
             raw_supports.append({'price': poc_price, 'label': 'POC', 'weight': 13})
         if smc["demand_zone"] and smc["demand_zone"] < current_price:
-            raw_supports.append({'price': smc["demand_zone"], 'label': 'Demand Zone 🟢', 'weight': 15})
+            raw_supports.append({'price': smc["demand_zone"], 'label': 'Demand Zone', 'weight': 15})
         if smc["bull_ob"] and smc["bull_ob"] < current_price:
-            raw_supports.append({'price': smc["bull_ob"], 'label': 'Bullish OB 📦', 'weight': 16})
+            raw_supports.append({'price': smc["bull_ob"], 'label': 'Bullish OB', 'weight': 16})
         if smc["bull_fvg"] and smc["bull_fvg"] < current_price:
-            raw_supports.append({'price': smc["bull_fvg"], 'label': 'Bullish FVG ⚡', 'weight': 14})
+            raw_supports.append({'price': smc["bull_fvg"], 'label': 'Bullish FVG', 'weight': 14})
 
-        raw_resistances = [
-            {'price': current_price + 1.8 * atr_val, 'label': 'ATR Target', 'weight': 9},
-        ]
+        raw_resistances = [{'price': current_price + 1.8 * atr_val, 'label': 'ATR Target', 'weight': 9}]
         if ema_50 > current_price:
             raw_resistances.append({'price': ema_50, 'label': 'EMA 50', 'weight': 10})
         if ema_200 > current_price:
-            raw_resistances.append({'price': ema_200, 'label': 'EMA 200 🚧', 'weight': 16})
+            raw_resistances.append({'price': ema_200, 'label': 'EMA 200', 'weight': 16})
         if poc_price > current_price:
             raw_resistances.append({'price': poc_price, 'label': 'POC', 'weight': 13})
         if smc["supply_zone"] and smc["supply_zone"] > current_price:
-            raw_resistances.append({'price': smc["supply_zone"], 'label': 'Supply Zone 🔴', 'weight': 15})
+            raw_resistances.append({'price': smc["supply_zone"], 'label': 'Supply Zone', 'weight': 15})
         if smc["bear_ob"] and smc["bear_ob"] > current_price:
-            raw_resistances.append({'price': smc["bear_ob"], 'label': 'Bearish OB 📦', 'weight': 16})
+            raw_resistances.append({'price': smc["bear_ob"], 'label': 'Bearish OB', 'weight': 16})
         if smc["bear_fvg"] and smc["bear_fvg"] > current_price:
-            raw_resistances.append({'price': smc["bear_fvg"], 'label': 'Bearish FVG ⚡', 'weight': 14})
+            raw_resistances.append({'price': smc["bear_fvg"], 'label': 'Bearish FVG', 'weight': 14})
 
         sup_zones = build_confluence_zones(raw_supports, current_price, atr_val, True, rsi_val, rvol, macd_turning_up, is_uptrend, smc["is_bullish_shift"])
         res_zones = build_confluence_zones(raw_resistances, current_price, atr_val, False, rsi_val, rvol, macd_turning_up, is_uptrend, smc["is_bullish_shift"])
@@ -536,41 +692,77 @@ def get_pro_stock_data(symbol, interval="1d"):
         if interval == "1d":
             log_weekly_setup_to_sheets(symbol, best_entry, tp1, tp2, tp3, stop_loss, sup_zones[0]['setup_score'])
 
-        currency = "THB" if ".BK" in symbol else "USD"
+        meta = fetch_fundamentals_and_meta(symbol, current_price, ema_200) if include_meta else {
+            "company_name": symbol, "exchange": "US", "currency": "THB" if ".BK" in symbol else "USD",
+            "currency_sym": "฿" if ".BK" in symbol else "$", "fair_value": None, "fv_note": "", "after_hours": None
+        }
+
+        mtf = compute_mtf_forecast(df_daily, current_price, ema_200, meta["fair_value"])
+        mtf_total = sum(v["score"] for v in mtf.values())
+
+        # สรุป Investment Decision
+        if mtf_total >= 4 and max_score >= 65:
+            decision = "STRONG BUY"
+            dec_color = "#059669"
+            dec_desc = f"เทรนด์หลักและโครงสร้าง ({smc['structure']}) แข็งแกร่ง แนะนำทยอยรับที่ {best_entry:,.2f}"
+        elif mtf_total >= 1:
+            decision = "BUY ON DIP"
+            dec_color = "#10B981"
+            dec_desc = f"แนวโน้มยังเป็นบวก รอย่อรับโซน {sup_zones[0]['label']} ({best_entry:,.2f}) เพื่อ R:R ที่คุ้มค่า"
+        elif mtf_total <= -3:
+            decision = "CAUTION / SELL"
+            dec_color = "#DC2626"
+            dec_desc = f"โครงสร้างอ่อนแรง ({smc['structure']}) หลีกเลี่ยงการรับมีด รอดูฐานราคาใหม่"
+        else:
+            decision = "HOLD / WAIT"
+            dec_color = "#D97706"
+            dec_desc = f"ราคายังแกว่งตัวในกรอบ รอสัญญาณยืนยันที่แนวรับ {best_entry:,.2f} หรือเบรกต้าน"
+
+        cur_sym = meta["currency_sym"]
+        fv_val = meta["fair_value"]
+        if fv_val and fv_val > 0:
+            upside_pct = ((fv_val - current_price) / current_price) * 100
+            up_sign = "+" if upside_pct >= 0 else ""
+            fv_str = f"{cur_sym}{fv_val:,.2f}"
+            fv_sub = f"{up_sign}{upside_pct:.1f}% ({meta['fv_note']})"
+            fv_color = "#059669" if upside_pct >= 0 else "#DC2626"
+        else:
+            fv_str = f"{cur_sym}—"
+            fv_sub = "รอข้อมูลงบ"
+            fv_color = "#64748B"
+
         change_sign = "+" if price_change >= 0 else ""
-        change_color = "#00D26A" if price_change >= 0 else "#FF4D4D"
+        change_color = "#059669" if price_change >= 0 else "#DC2626"
 
         return {
             "symbol": symbol,
+            "company_meta": f"{meta['company_name']} · {meta['exchange']} · {meta['currency']}",
             "interval": interval.upper(),
             "raw_price": current_price,
-            "raw_rsi": rsi_val,
-            "raw_rr": rr_ratio,
             "raw_sup1": sup_zones[0],
-            "raw_res1": res_zones[0],
-            "raw_sl": stop_loss,
-            "price_str": f"{current_price:,.2f} {currency}",
+            "price_main": f"{cur_sym}{current_price:,.2f}",
+            "price_str": f"{current_price:,.2f} {meta['currency']}",
             "change_str": f"{change_sign}{price_change:.2f}%",
             "change_color": change_color,
+            "after_hours_str": f"After-Hours: {cur_sym}{meta['after_hours']:,.2f}" if meta["after_hours"] else f"Day: {day_low:,.2f} - {day_high:,.2f}",
+            "w52_str": f"52W: {w52_low:,.2f} - {w52_high:,.2f}",
+            "fv_str": fv_str,
+            "fv_sub": fv_sub,
+            "fv_color": fv_color,
             "setup_score": f"{max_score}/100",
+            "score_int": max_score,
             "rsi_str": f"{rsi_val:.1f}",
-            "structure": smc["structure"],
-            "action_note": smc["action_note"],
-            "ema_poc_str": f"EMA50: {ema_50:,.2f} | EMA200: {ema_200:,.2f}",
+            "mtf": mtf,
+            "decision": decision,
+            "dec_color": dec_color,
+            "dec_desc": dec_desc,
             "supports": [
                 f"{sup_zones[0]['price']:,.2f} [Score {sup_zones[0]['setup_score']}] • {sup_zones[0]['label']}",
-                f"{sup_zones[1]['price']:,.2f} [Score {sup_zones[1]['setup_score']}] • {sup_zones[1]['label']}",
-                f"{sup_zones[2]['price']:,.2f} [Score {sup_zones[2]['setup_score']}] • {sup_zones[2]['label']}"
-            ],
-            "resistances": [
-                f"{res_zones[0]['price']:,.2f} [ต้าน {res_zones[0]['setup_score']}] • {res_zones[0]['label']}",
-                f"{res_zones[1]['price']:,.2f} [ต้าน {res_zones[1]['setup_score']}] • {res_zones[1]['label']}",
-                f"{res_zones[2]['price']:,.2f} [ต้าน {res_zones[2]['setup_score']}] • {res_zones[2]['label']}"
+                f"{sup_zones[1]['price']:,.2f} [Score {sup_zones[1]['setup_score']}] • {sup_zones[1]['label']}"
             ],
             "setup_str": (
-                f"• จุดรอรับ (Entry): {best_entry:,.2f} ({sup_zones[0]['label']})\n"
-                f"• เป้าทำกำไร (3 ไม้): TP1: {tp1:,.2f} | TP2: {tp2:,.2f} | TP3: {tp3:,.2f}\n"
-                f"• ตัดขาดทุน (SL): {stop_loss:,.2f} (R:R เฉลี่ย 1:{rr_ratio:.1f})"
+                f"Entry: {best_entry:,.2f} | SL: {stop_loss:,.2f} (R:R 1:{rr_ratio:.1f})\n"
+                f"TP1: {tp1:,.2f} | TP2: {tp2:,.2f} | TP3: {tp3:,.2f}"
             )
         }
     except Exception as e:
@@ -578,7 +770,204 @@ def get_pro_stock_data(symbol, interval="1d"):
         return None
 
 # ==========================================
-# ส่วนที่ 4: Strategist & Alert Agent (Discord & LINE)
+# ส่วนที่ 4: Dashboard Flex Card (สไตล์ Smart Stock Analyzer)
+# ==========================================
+def build_flex_card(data):
+    score_int = data["score_int"]
+    badge_bg = "#DCFCE7" if score_int >= 70 else ("#FEF3C7" if score_int >= 55 else "#FEE2E2")
+    badge_txt = "#166534" if score_int >= 70 else ("#92400E" if score_int >= 55 else "#991B1B")
+
+    def mtf_row(label, item):
+        return {
+            "type": "box",
+            "layout": "horizontal",
+            "paddingTop": "6px",
+            "paddingBottom": "6px",
+            "contents": [
+                {"type": "text", "text": label, "size": "xs", "color": "#334155", "flex": 3},
+                {"type": "text", "text": item["dir"], "size": "xs", "color": item["color"], "weight": "bold", "flex": 5},
+                {"type": "text", "text": item["conf"], "size": "xs", "color": "#0F172A", "weight": "bold", "align": "end", "flex": 2}
+            ]
+        }
+
+    bubble_dict = {
+        "type": "bubble",
+        "size": "mega",
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#FFFFFF",
+            "paddingAll": "18px",
+            "contents": [
+                # แถวบนสุด: ชื่อระบบ + Badge Score
+                {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "alignItems": "center",
+                    "contents": [
+                        {"type": "text", "text": "AXION SMART ANALYZER", "weight": "bold", "size": "sm", "color": "#0F172A", "flex": 6},
+                        {
+                            "type": "box",
+                            "layout": "vertical",
+                            "backgroundColor": badge_bg,
+                            "cornerRadius": "99px",
+                            "paddingTop": "3px",
+                            "paddingBottom": "3px",
+                            "paddingStart": "10px",
+                            "paddingEnd": "10px",
+                            "flex": 0,
+                            "contents": [
+                                {"type": "text", "text": f"Score {data['setup_score']}", "size": "xxs", "weight": "bold", "color": badge_txt}
+                            ]
+                        }
+                    ]
+                },
+                # ส่วน Symbol
+                {"type": "text", "text": "SYMBOL", "size": "xxs", "color": "#64748B", "margin": "md"},
+                {"type": "text", "text": f"{data['symbol']} ({data['interval']})", "size": "xxl", "weight": "bold", "color": "#0F172A"},
+                {"type": "text", "text": data["company_meta"], "size": "xs", "color": "#64748B", "margin": "xs", "wrap": True},
+
+                # กล่องราคา 2 คอลัมน์ (Market Price | Fair Value)
+                {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "margin": "lg",
+                    "spacing": "md",
+                    "backgroundColor": "#F8FAFC",
+                    "cornerRadius": "12px",
+                    "paddingAll": "12px",
+                    "contents": [
+                        {
+                            "type": "box",
+                            "layout": "vertical",
+                            "flex": 1,
+                            "contents": [
+                                {"type": "text", "text": "Market Price", "size": "xxs", "color": "#64748B"},
+                                {"type": "text", "text": data["price_main"], "size": "lg", "weight": "bold", "color": "#0F172A", "margin": "xs"},
+                                {"type": "text", "text": data["change_str"], "size": "xxs", "weight": "bold", "color": data["change_color"]}
+                            ]
+                        },
+                        {
+                            "type": "box",
+                            "layout": "vertical",
+                            "flex": 1,
+                            "contents": [
+                                {"type": "text", "text": "Fair Value", "size": "xxs", "color": "#64748B"},
+                                {"type": "text", "text": data["fv_str"], "size": "lg", "weight": "bold", "color": "#0F172A", "margin": "xs"},
+                                {"type": "text", "text": data["fv_sub"], "size": "xxs", "weight": "bold", "color": data["fv_color"]}
+                            ]
+                        }
+                    ]
+                },
+                # แถบ Day Range / After-Hours / 52W
+                {
+                    "type": "text",
+                    "text": f"{data['after_hours_str']}  |  {data['w52_str']}",
+                    "size": "xxs",
+                    "color": "#64748B",
+                    "margin": "sm",
+                    "wrap": True
+                },
+
+                # หัวข้อ Multi-Timeframe Forecast
+                {"type": "text", "text": "Multi-Timeframe Forecast", "weight": "bold", "size": "sm", "color": "#0F172A", "margin": "lg"},
+                {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "margin": "sm",
+                    "paddingBottom": "4px",
+                    "contents": [
+                        {"type": "text", "text": "ระยะ", "size": "xxs", "weight": "bold", "color": "#475569", "flex": 3},
+                        {"type": "text", "text": "ทิศทาง", "size": "xxs", "weight": "bold", "color": "#475569", "flex": 5},
+                        {"type": "text", "text": "ความมั่นใจ", "size": "xxs", "weight": "bold", "color": "#475569", "align": "end", "flex": 2}
+                    ]
+                },
+                {"type": "separator", "color": "#E2E8F0"},
+                mtf_row("Daily", data["mtf"]["Daily"]),
+                {"type": "separator", "color": "#F1F5F9"},
+                mtf_row("Weekly", data["mtf"]["Weekly"]),
+                {"type": "separator", "color": "#F1F5F9"},
+                mtf_row("Monthly", data["mtf"]["Monthly"]),
+                {"type": "separator", "color": "#F1F5F9"},
+                mtf_row("Yearly", data["mtf"]["Yearly"]),
+                {"type": "separator", "margin": "md", "color": "#E2E8F0"},
+
+                # หัวข้อ Investment Decision + แผนเทรด 3 ไม้
+                {"type": "text", "text": "Investment Decision", "size": "xs", "weight": "bold", "color": "#475569", "margin": "md"},
+                {"type": "text", "text": data["decision"], "size": "xl", "weight": "bold", "color": data["dec_color"], "margin": "xs"},
+                {"type": "text", "text": data["dec_desc"], "size": "xxs", "color": "#475569", "margin": "xs", "wrap": True},
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "margin": "md",
+                    "backgroundColor": "#F8FAFC",
+                    "cornerRadius": "8px",
+                    "paddingAll": "10px",
+                    "contents": [
+                        {"type": "text", "text": data["setup_str"], "size": "xxs", "color": "#0F172A", "wrap": True}
+                    ]
+                }
+            ]
+        },
+        # ปุ่มกด 2x2 ฝังในการ์ด (อยู่ในหน้าจอ 100% ไม่ล้นจอ)
+        "footer": {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "paddingAll": "12px",
+            "backgroundColor": "#F8FAFC",
+            "contents": [
+                {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "spacing": "sm",
+                    "contents": [
+                        {
+                            "type": "button",
+                            "style": "primary",
+                            "color": "#0F172A",
+                            "height": "sm",
+                            "action": {"type": "message", "label": "📊 สรุปพอร์ต", "text": "/SUMMARY"}
+                        },
+                        {
+                            "type": "button",
+                            "style": "primary",
+                            "color": "#059669",
+                            "height": "sm",
+                            "action": {"type": "message", "label": "🎯 สแกนรับ", "text": "/SCAN_SUPPORT"}
+                        }
+                    ]
+                },
+                {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "spacing": "sm",
+                    "contents": [
+                        {
+                            "type": "button",
+                            "style": "secondary",
+                            "height": "sm",
+                            "action": {"type": "message", "label": "📋 Watchlist", "text": "/LIST"}
+                        },
+                        {
+                            "type": "button",
+                            "style": "secondary",
+                            "height": "sm",
+                            "action": {"type": "message", "label": "🏆 สถิติ TP/SL", "text": "/WEEKLY_PERF"}
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+    return FlexMessage(
+        alt_text=f"Axion Dashboard: {data['symbol']} ({data['decision']})",
+        contents=FlexContainer.from_dict(bubble_dict),
+        quick_reply=get_quick_reply_buttons(data['symbol'])
+    )
+
+# ==========================================
+# ส่วนที่ 5: Strategist & Alert Agent (Discord & LINE)
 # ==========================================
 def scan_and_notify_discord():
     if not DISCORD_WEBHOOK_URL:
@@ -591,7 +980,7 @@ def scan_and_notify_discord():
 
     now_ts = time.time()
     for sym in all_symbols[:20]:
-        data = get_pro_stock_data(sym, "1d")
+        data = get_pro_stock_data(sym, "1d", include_meta=False)
         time.sleep(2.0)
         if not data:
             continue
@@ -603,8 +992,8 @@ def scan_and_notify_discord():
             if now_ts - discord_alert_cooldown.get(key, 0) > 6 * 3600:
                 discord_alert_cooldown[key] = now_ts
                 msg = (
-                    f"🟢 **[Axion Quant Alert] ราคาหุ้น `{data['symbol']}` เข้าโซนรับสำคัญ!**\n"
-                    f"• ราคา: `{data['price_str']}`\n"
+                    f"🟢 **[Axion Quant Alert] `{data['symbol']}` เข้าโซนรับสำคัญ!**\n"
+                    f"• ราคา: `{data['price_str']}` ({data['change_str']})\n"
                     f"• แนวรับ L1: `{sup1['price']:,.2f}` [{sup1['label']}] (Score: {sup1['setup_score']}/100)\n"
                     f"• แผนเทรด: {data['setup_str']}"
                 )
@@ -612,43 +1001,6 @@ def scan_and_notify_discord():
                     requests.post(DISCORD_WEBHOOK_URL, json={"content": msg}, timeout=10)
                 except Exception:
                     pass
-
-def build_flex_card(data):
-    bubble_dict = {
-        "type": "bubble",
-        "size": "mega",
-        "header": {
-            "type": "box",
-            "layout": "vertical",
-            "backgroundColor": "#0F0F1E",
-            "paddingAll": "16px",
-            "contents": [
-                {"type": "text", "text": "AXION QUANT ENGINE", "size": "xxs", "color": "#00D26A", "weight": "bold"},
-                {"type": "text", "text": f"📊 {data['symbol']}", "weight": "bold", "size": "xl", "color": "#FFFFFF", "margin": "xs"},
-                {"type": "text", "text": f"{data['price_str']} ({data['change_str']})", "size": "lg", "weight": "bold", "color": data['change_color'], "margin": "sm"}
-            ]
-        },
-        "body": {
-            "type": "box",
-            "layout": "vertical",
-            "paddingAll": "16px",
-            "contents": [
-                {"type": "text", "text": f"🏛️ โครงสร้างตลาด: {data['structure']}", "size": "xs", "weight": "bold", "wrap": True},
-                {"type": "text", "text": f"📈 RSI: {data['rsi_str']}", "size": "xs", "margin": "xs"},
-                {"type": "separator", "margin": "md"},
-                {"type": "text", "text": "🟢 โซนรับหลัก (Demand / OB / FVG):", "size": "sm", "weight": "bold", "color": "#008000", "margin": "md"},
-                {"type": "text", "text": f"1. {data['supports'][0]}\n2. {data['supports'][1]}", "size": "xs", "wrap": True},
-                {"type": "separator", "margin": "md"},
-                {"type": "text", "text": "💡 แผนเทรดแบ่ง 3 ไม้ & ความเสี่ยง:", "size": "xs", "weight": "bold", "margin": "md"},
-                {"type": "text", "text": data['setup_str'], "size": "xxs", "wrap": True}
-            ]
-        }
-    }
-    return FlexMessage(
-        alt_text=f"Axion วิเคราะห์ {data['symbol']}",
-        contents=FlexContainer.from_dict(bubble_dict),
-        quick_reply=get_quick_reply_buttons(data['symbol'])
-    )
 
 @app.route("/", methods=['GET', 'HEAD'])
 def health_check():
@@ -659,7 +1011,7 @@ def health_check():
     if DISCORD_WEBHOOK_URL and (now_ts - last_auto_scan_time > 1800):
         last_auto_scan_time = now_ts
         threading.Thread(target=scan_and_notify_discord, daemon=True).start()
-    return "Axion Quant Engine (Institutional Multi-TP/SL + Quick Reply) is Awake!", 200
+    return "Axion Smart Analyzer (Dashboard + MTF + Fair Value) is Awake!", 200
 
 @app.route("/scan_discord", methods=['GET'])
 def manual_discord_trigger():
@@ -684,8 +1036,9 @@ def handle_message(event):
     user_message = event.message.text.strip()
     command = user_message.upper()
 
+    # ตั้งค่า Watchlist เริ่มต้น SCHG, JEPQ, QQQ, RKLB เสมอ
     if user_id not in user_watchlists:
-        user_watchlists[user_id] = ["GOOGL", "NVDA", "QQQM", "RKLB"]
+        user_watchlists[user_id] = list(DEFAULT_WATCHLIST)
 
     watchlist = user_watchlists[user_id]
     messages_to_reply = []
@@ -693,12 +1046,12 @@ def handle_message(event):
 
     if command in ["/HELP", "HELP"]:
         help_text = (
-            "📖 **คู่มือการใช้งาน Axion Quant**\n\n"
-            "• พิมพ์ชื่อหุ้น (เช่น `NVDA`, `PTT.BK`, `NVDA H1`) ดูการ์ดแผนเทรด 3 ไม้\n"
-            "• `/WEEKLY_PERF` ตรวจสรุปยอด TP/SL รายสัปดาห์จาก Google Sheets\n"
-            "• `+[ชื่อหุ้น]` / `-[ชื่อหุ้น]` จัดการ Watchlist\n"
-            "• `/SUMMARY` สรุปพอร์ต | `/SCAN_SUPPORT` สแกนหาโซนรับ\n"
-            "• `/LIST` ดูรายชื่อหุ้นใน Watchlist"
+            "📖 คู่มือการใช้งาน Axion Smart Analyzer\n\n"
+            "• พิมพ์ชื่อหุ้น (เช่น QCOM, RKLB, SCHG) ดูหน้าต่าง Dashboard ครบชุด\n"
+            "• /WEEKLY_PERF ตรวจสรุปยอด TP/SL รายสัปดาห์\n"
+            "• +[ชื่อหุ้น] / -[ชื่อหุ้น] เพิ่มหรือลบ Watchlist\n"
+            "• /SUMMARY สรุปพอร์ต | /SCAN_SUPPORT สแกนโซนรับ\n"
+            "• /LIST ดูรายชื่อหุ้นใน Watchlist"
         )
         messages_to_reply.append(TextMessage(text=help_text, quick_reply=default_qr))
 
@@ -711,40 +1064,40 @@ def handle_message(event):
             messages_to_reply.append(TextMessage(text="📭 Watchlist ว่างเปล่า พิมพ์ +ตามด้วยชื่อหุ้นเพื่อเพิ่ม", quick_reply=default_qr))
         else:
             list_str = "\n".join([f"{i+1}. {s}" for i, s in enumerate(watchlist)])
-            messages_to_reply.append(TextMessage(text=f"📋 **Axion Watchlist ({len(watchlist)} ตัว):**\n{list_str}", quick_reply=default_qr))
+            messages_to_reply.append(TextMessage(text=f"📋 Axion Watchlist ({len(watchlist)} ตัว):\n{list_str}", quick_reply=default_qr))
 
     elif command in ["/SUMMARY", "SUMMARY"]:
         if not watchlist:
             messages_to_reply.append(TextMessage(text="📭 Watchlist ว่างเปล่าครับ", quick_reply=default_qr))
         else:
-            summary_lines = ["📊 **Axion สรุปโครงสร้างพอร์ต:**"]
+            summary_lines = ["📊 Axion สรุปโครงสร้างพอร์ต:"]
             for sym in watchlist:
-                d = get_pro_stock_data(sym, "1d")
+                d = get_pro_stock_data(sym, "1d", include_meta=False)
                 if d:
-                    summary_lines.append(f"\n🔹 **{d['symbol']}** : {d['price_str']}\n   └ รับ: {d['supports'][0]}")
+                    summary_lines.append(f"\n🔹 {d['symbol']} : {d['price_str']} ({d['change_str']})\n   └ รับ: {d['supports'][0]}")
             messages_to_reply.append(TextMessage(text="\n".join(summary_lines), quick_reply=default_qr))
 
     elif command in ["/SCAN_SUPPORT", "SCAN_SUPPORT"]:
         setups = []
         for sym in GLOBAL_SCAN_POOL[:10]:
-            d = get_pro_stock_data(sym, "1d")
-            if d and int(d['setup_score'].split('/')[0]) >= 68:
+            d = get_pro_stock_data(sym, "1d", include_meta=False)
+            if d and d['score_int'] >= 65:
                 setups.append(d)
         if setups:
-            lines = ["🎯 **Axion คัดหุ้นเข้าโซนรับเด่น:**"]
+            lines = ["🎯 Axion คัดหุ้นเข้าโซนรับเด่น:"]
             for s in setups[:5]:
-                lines.append(f"\n🏆 **{s['symbol']}** ({s['price_str']})\n   • {s['supports'][0]}")
+                lines.append(f"\n🏆 {s['symbol']} ({s['price_str']})\n   • {s['supports'][0]}")
             messages_to_reply.append(TextMessage(text="\n".join(lines), quick_reply=default_qr))
         else:
             messages_to_reply.append(TextMessage(text="🛡️ ยังไม่มีหุ้นตัวหลักเข้าโซนรับในรอบนี้", quick_reply=default_qr))
 
     elif user_message.startswith("+"):
         add_sym = user_message[1:].strip().upper()
-        chk = get_pro_stock_data(add_sym)
+        chk = get_pro_stock_data(add_sym, include_meta=False)
         if chk:
             if chk['symbol'] not in watchlist:
                 watchlist.append(chk['symbol'])
-            messages_to_reply.append(TextMessage(text=f"✅ เพิ่ม **{chk['symbol']}** เข้า Watchlist ของ Axion แล้ว", quick_reply=default_qr))
+            messages_to_reply.append(TextMessage(text=f"✅ เพิ่ม {chk['symbol']} เข้า Watchlist แล้ว", quick_reply=default_qr))
         else:
             messages_to_reply.append(TextMessage(text=f"⚠️ ไม่พบข้อมูลหุ้น '{add_sym}'", quick_reply=default_qr))
 
@@ -754,7 +1107,7 @@ def handle_message(event):
             watchlist.remove(rem_sym)
         elif f"{rem_sym}.BK" in watchlist:
             watchlist.remove(f"{rem_sym}.BK")
-        messages_to_reply.append(TextMessage(text=f"🗑️ ลบ **{rem_sym}** ออกจาก Watchlist แล้ว", quick_reply=default_qr))
+        messages_to_reply.append(TextMessage(text=f"🗑️ ลบ {rem_sym} ออกจาก Watchlist แล้ว", quick_reply=default_qr))
 
     else:
         parts = command.split()
@@ -765,7 +1118,7 @@ def handle_message(event):
                 tf = "15m"
             elif parts[1] in ["H1", "1H", "60M"]:
                 tf = "1h"
-        data = get_pro_stock_data(stock_name, interval=tf)
+        data = get_pro_stock_data(stock_name, interval=tf, include_meta=True)
         if data:
             messages_to_reply.append(build_flex_card(data))
         else:
