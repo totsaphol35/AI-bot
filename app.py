@@ -13,7 +13,7 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage
 # ==========================================
 # 1. การตั้งค่าหลัก & Environment Variables
 # ==========================================
-MODEL_VERSION = "1.5.0-universal-pro"
+MODEL_VERSION = "1.5.1-universal-pro-myid"
 
 app = Flask(__name__)
 
@@ -409,6 +409,15 @@ if handler:
     def handle_message(event):
         text_lower = event.message.text.strip().lower()
 
+        # คำสั่งดึง LINE User ID ส่วนตัว
+        if text_lower == "myid":
+            uid = getattr(event.source, "user_id", "ไม่พบ User ID")
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=f"LINE_USER_ID ของคุณคือ:\n{uid}")
+            )
+            return
+
         # เช็กภาพรวมทุกตัว
         if text_lower == "/scan":
             lines = ["📊 AXION V5.0 UNIVERSAL SCAN (M15)"]
@@ -455,6 +464,7 @@ if handler:
         if text_lower in ["/help", "help", "คำสั่ง"]:
             help_txt = (
                 "🤖 AXION QUANT CORE V1.5 UNIVERSAL\n"
+                "• myid — ดู LINE_USER_ID ของคุณ\n"
                 "• /scan — เช็กคะแนนทุกตัวพร้อมกัน\n"
                 "• /gold — เช็กทองคำ (XAUUSD)\n"
                 "• /btc — เช็กบิทคอยน์ (BTCUSD)\n"
