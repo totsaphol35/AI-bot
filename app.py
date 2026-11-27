@@ -36,13 +36,15 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET or 'MISSING_SECRET')
 DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL', '')
 GOOGLE_SHEET_WEBHOOK_URL = os.getenv('GOOGLE_SHEET_WEBHOOK_URL', '')
 DB_PATH = os.getenv('AXION_DB_PATH', 'axion_smart_analyzer.db')
-MODEL_VERSION = '1.2.0-backtest-both-10y'
+MODEL_VERSION = '1.2.1-backtest-gold-smc'
 
 # Watchlist เริ่มต้นถาวรทุกครั้งที่อัปเดตหรือรีสตาร์ทระบบ
 DEFAULT_WATCHLIST = ["SCHG", "JEPQ", "QQQI", "RKLB"]
 user_watchlists = {}
 discord_alert_cooldown = {}
 last_auto_scan_time = 0
+last_gold_scan_time = 0
+last_gold_alert_bar_time = None
 
 GLOBAL_SCAN_POOL = [
     "SCHG", "JEPQ", "QQQI", "RKLB",
@@ -58,16 +60,16 @@ def get_quick_reply_buttons(symbol=None):
         short_sym = symbol.replace(".BK", "")[:6]
         items = [
             QuickReplyItem(action=MessageAction(label=f"🧪 เทส {short_sym}", text=f"/BACKTEST {symbol}")),
-            QuickReplyItem(action=MessageAction(label=f"➕ {short_sym}", text=f"+{symbol}")),
+            QuickReplyItem(action=MessageAction(label="🥇 ทอง M15", text="/GOLD")),
             QuickReplyItem(action=MessageAction(label="📊 พอร์ต", text="/SUMMARY")),
             QuickReplyItem(action=MessageAction(label="📋 ลิสต์", text="/LIST")),
         ]
     else:
         items = [
+            QuickReplyItem(action=MessageAction(label="🥇 ทอง M15", text="/GOLD")),
             QuickReplyItem(action=MessageAction(label="📊 พอร์ต", text="/SUMMARY")),
             QuickReplyItem(action=MessageAction(label="🎯 สแกน", text="/SCAN_SUPPORT")),
             QuickReplyItem(action=MessageAction(label="📋 ลิสต์", text="/LIST")),
-            QuickReplyItem(action=MessageAction(label="🧪 เทส 10Y", text="/BACKTEST QCOM")),
         ]
     return QuickReply(items=items)
 
@@ -359,14 +361,170 @@ def compute_mtf_forecast(df_1d, current_price, ema_200, fair_value=None):
     return {"Daily": daily_res, "Weekly": weekly_res, "Monthly": monthly_res, "Yearly": yearly_res}
 
 # ==========================================
+# ส่วนที่ 2.4: GOLD M15 SMC V2.1 SCANNER (EMA50/200 + FVG/OB + WICK SWEEP)
+# ==========================================
+def analyze_gold_smc_m15(symbol="GC=F", interval="15m"):
+    """
+    จำลองสูตร Axion SMC V2.1 (Non-Repaint) บนกราฟทองคำ M15
+    ตรวจเฉพาะแท่งเทียนที่ปิดสมบูรณ์แล้ว (iloc[-2])
+    """
+    df = fetch_clean_history(symbol, period="1mo", interval=interval)
+    if df is None or len(df) < 210:
+        return None
+
+    # ตัดแท่งล่าสุดที่ยังไม่ปิดออก เพื่อป้องกัน Repaint 100%
+    df_closed = df.iloc[:-1].copy()
+    opens = df_closed['Open'].values
+    highs = df_closed['High'].values
+    lows = df_closed['Low'].values
+    closes = df_closed['Close'].values
+    times = df_closed.index
+
+    ema50 = df_closed['Close'].ewm(span=50, adjust=False).mean().values
+    ema200 = df_closed['Close'].ewm(span=200, adjust=False).mean().values
+    atr = calculate_atr_series(df_closed, 14).values
+
+    bull_zones = []
+    bear_zones = []
+    max_zones = 6
+    last_signal = None
+
+    # ไล่สร้างและตัดโซนที่ถูกทำลายตามลำดับเวลาจริง (Causal)
+    start_idx = max(len(df_closed) - 250, 15)
+    for i in range(start_idx, len(df_closed)):
+        o, h, l, c = opens[i], highs[i], lows[i], closes[i]
+        cur_atr = atr[i]
+        if not np.isfinite(cur_atr) or cur_atr <= 0:
+            continue
+
+        tapped_bull = False
+        tapped_bull_bot = None
+        new_bull = []
+        for z in bull_zones:
+            if l <= z['top'] and c >= z['bot']:
+                tapped_bull = True
+                tapped_bull_bot = z['bot'] if tapped_bull_bot is None else min(tapped_bull_bot, z['bot'])
+            if c >= z['bot']:
+                new_bull.append(z)
+        bull_zones = new_bull
+
+        tapped_bear = False
+        tapped_bear_top = None
+        new_bear = []
+        for z in bear_zones:
+            if h >= z['bot'] and c <= z['top']:
+                tapped_bear = True
+                tapped_bear_top = z['top'] if tapped_bear_top is None else max(tapped_bear_top, z['top'])
+            if c <= z['top']:
+                new_bear.append(z)
+        bear_zones = new_bear
+
+        # ตรวจสัญญาณเฉพาะแท่งสุดท้ายที่เพิ่งปิด (i == len - 1)
+        if i == len(df_closed) - 1:
+            is_bull_trend = (c > ema200[i]) and (ema50[i] >= ema200[i])
+            is_bear_trend = (c < ema200[i]) and (ema50[i] <= ema200[i])
+
+            bar_range = h - l
+            lower_wick = min(o, c) - l
+            upper_wick = h - max(o, c)
+
+            is_bull_wick = bar_range > 0 and (lower_wick / bar_range) >= 0.45 and c >= (l + bar_range * 0.5)
+            is_bear_wick = bar_range > 0 and (upper_wick / bar_range) >= 0.45 and c <= (h - bar_range * 0.5)
+
+            prev_low = float(np.min(lows[max(0, i - 8):i]))
+            prev_high = float(np.max(highs[max(0, i - 8):i]))
+            is_bull_sweep = (l < prev_low) and (c > prev_low)
+            is_bear_sweep = (h > prev_high) and (c < prev_high)
+
+            if is_bull_trend and tapped_bull and is_bull_wick and is_bull_sweep:
+                base_sl = min(l, tapped_bull_bot) if tapped_bull_bot is not None else l
+                sl_p = base_sl - (0.50 * cur_atr)
+                risk = max(c - sl_p, cur_atr * 0.6)
+                last_signal = {
+                    "type": "BUY", "bar_time": str(times[i]),
+                    "entry": c, "sl": sl_p,
+                    "tp1": c + 1.5 * risk, "tp2": c + 2.5 * risk, "tp3": c + 3.5 * risk
+                }
+            elif is_bear_trend and tapped_bear and is_bear_wick and is_bear_sweep:
+                base_sl = max(h, tapped_bear_top) if tapped_bear_top is not None else h
+                sl_p = base_sl + (0.50 * cur_atr)
+                risk = max(sl_p - c, cur_atr * 0.6)
+                last_signal = {
+                    "type": "SELL", "bar_time": str(times[i]),
+                    "entry": c, "sl": sl_p,
+                    "tp1": c - 1.5 * risk, "tp2": c - 2.5 * risk, "tp3": c - 3.5 * risk
+                }
+
+        # สร้าง FVG ใหม่
+        if i >= 2:
+            if l > highs[i - 2] and (l - highs[i - 2]) >= cur_atr * 0.20:
+                bull_zones.append({"type": "FVG", "top": float(l), "bot": float(highs[i - 2])})
+            if h < lows[i - 2] and (lows[i - 2] - h) >= cur_atr * 0.20:
+                bear_zones.append({"type": "FVG", "top": float(lows[i - 2]), "bot": float(h)})
+
+        # สร้าง Order Block ใหม่
+        if i >= 1:
+            if closes[i - 1] < opens[i - 1] and (c - o) >= cur_atr * 1.20 and c > highs[i - 1]:
+                bull_zones.append({"type": "OB", "top": float(highs[i - 1]), "bot": float(lows[i - 1])})
+            if closes[i - 1] > opens[i - 1] and (o - c) >= cur_atr * 1.20 and c < lows[i - 1]:
+                bear_zones.append({"type": "OB", "top": float(highs[i - 1]), "bot": float(lows[i - 1])})
+
+        if len(bull_zones) > max_zones:
+            bull_zones = bull_zones[-max_zones:]
+        if len(bear_zones) > max_zones:
+            bear_zones = bear_zones[-max_zones:]
+
+    curr_c = float(closes[-1])
+    curr_e50 = float(ema50[-1])
+    curr_e200 = float(ema200[-1])
+    if curr_c > curr_e200 and curr_e50 >= curr_e200:
+        trend_str = "ขาขึ้น (เน้นรอ Buy) 🟢"
+    elif curr_c < curr_e200 and curr_e50 <= curr_e200:
+        trend_str = "ขาลง (เน้นรอ Sell) 🔴"
+    else:
+        trend_str = "พักตัว / เลือกทาง 🟡"
+
+    return {
+        "symbol": symbol,
+        "price": curr_c,
+        "ema50": curr_e50,
+        "ema200": curr_e200,
+        "trend": trend_str,
+        "bar_time": str(times[-1]),
+        "bull_zones": bull_zones[-3:],
+        "bear_zones": bear_zones[-3:],
+        "signal": last_signal
+    }
+
+def scan_gold_and_notify_discord():
+    global last_gold_alert_bar_time
+    if not DISCORD_WEBHOOK_URL:
+        return None
+    res = analyze_gold_smc_m15("GC=F", "15m")
+    if not res or not res["signal"]:
+        return res
+    sig = res["signal"]
+    if sig["bar_time"] != last_gold_alert_bar_time:
+        last_gold_alert_bar_time = sig["bar_time"]
+        icon = "🟢" if sig["type"] == "BUY" else "🔴"
+        msg = (
+            f"{icon} **[AXION GOLD M15 SMC V2.1 • {sig['type']}]**\n"
+            f"• สินทรัพย์: `Gold Futures (GC=F)` | เทรนด์: {res['trend']}\n"
+            f"• Entry: `{sig['entry']:,.2f}`\n"
+            f"• SL (ใต้โซน+0.5ATR): `{sig['sl']:,.2f}`\n"
+            f"• TP1: `{sig['tp1']:,.2f}` | TP2: `{sig['tp2']:,.2f}` | TP3: `{sig['tp3']:,.2f}`\n"
+            f"*(หมายเหตุ: ราคาอ้างอิง GC=F เทียบส่วนต่างก่อนกดใน MT5)*"
+        )
+        try:
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": msg}, timeout=10)
+        except Exception as e:
+            print(f"Gold Discord alert error: {e}")
+    return res
+
+# ==========================================
 # ส่วนที่ 2.5: HISTORICAL WALK-FORWARD BACKTEST ENGINE (BOTH: FORECAST + TRADING, 10Y)
 # ==========================================
 def run_axion_backtest(symbol, period="10y", fee_bps=10.0):
-    """
-    ทดสอบย้อนหลัง 10 ปี (ปลอด Look-ahead Bias) ครอบคลุมทั้ง 2 ขอบเขต:
-    1) Forecast Accuracy: Daily (1d), Weekly (5d), Monthly (21d), Yearly (252d) + Balanced Accuracy
-    2) Trading Simulation: เข้าออเดอร์เมื่อเทรนด์บวก + ย่อแตะโซนรับ EMA20/ATR, แบ่งเป้า TP1/TP2/TP3, SL=1.35*ATR
-    """
     symbol = symbol.upper().strip()
     df = fetch_clean_history(symbol, period=period, interval="1d")
     if (df is None or len(df) < 80) and "." not in symbol:
@@ -378,11 +536,7 @@ def run_axion_backtest(symbol, period="10y", fee_bps=10.0):
     if df is None or len(df) < 80:
         return None
 
-    close = df['Close']
-    high = df['High']
-    low = df['Low']
-
-    # คำนวณ Features แบบ Causal (ใช้เฉพาะข้อมูลถึงวัน t เท่านั้น ห้ามใช้ข้อมูลอนาคต)
+    close, high, low = df['Close'], df['High'], df['Low']
     e20 = close.ewm(span=20, adjust=False).mean()
     e50 = close.ewm(span=50, adjust=False).mean()
     e200 = close.ewm(span=200, adjust=False).mean()
@@ -398,7 +552,6 @@ def run_axion_backtest(symbol, period="10y", fee_bps=10.0):
     )
     pred_up = pd.Series(pts >= 1, index=df.index)
 
-    # 1. Forecast Walk-Forward Evaluation (ตัดช่วง Warmup 200 วันแรกถ้าข้อมูลยาวพอ)
     warmup = 200 if len(df) > 300 else 50
     horizons = {"Daily": 1, "Weekly": 5, "Monthly": 21, "Yearly": 252}
     forecast_metrics = {}
@@ -417,70 +570,43 @@ def run_axion_backtest(symbol, period="10y", fee_bps=10.0):
         n_samples = int(len(valid))
         total_oos += n_samples
         acc = float((p_slice == actual_up).mean() * 100.0) if n_samples > 0 else 0.0
-
-        # Balanced Accuracy = (TPR + TNR) / 2
-        pos_mask = actual_up
-        neg_mask = ~actual_up
+        pos_mask, neg_mask = actual_up, ~actual_up
         tpr = float((p_slice[pos_mask] == True).mean()) if pos_mask.sum() > 0 else 0.5
         tnr = float((p_slice[neg_mask] == False).mean()) if neg_mask.sum() > 0 else 0.5
-        b_acc = ((tpr + tnr) / 2.0) * 100.0
-        balanced_accs.append(b_acc)
-
+        balanced_accs.append(((tpr + tnr) / 2.0) * 100.0)
         forecast_metrics[h_name] = {"acc": f"{acc:.1f}%", "samples": n_samples}
 
     avg_bal_acc = float(np.mean(balanced_accs)) if balanced_accs else 0.0
 
-    # 2. Trading Simulation (Walk-Forward Bar-by-Bar, 1 Position at a time)
-    closes_v = close.values
-    highs_v = high.values
-    lows_v = low.values
-    e20_v = e20.values
-    atr_v = atr.values
-    pts_v = pts
-
+    closes_v, highs_v, lows_v, e20_v, atr_v = close.values, high.values, low.values, e20.values, atr.values
     in_trade = False
     entry_p = sl_p = tp1_p = tp2_p = tp3_p = 0.0
     tp1_hit = tp2_hit = False
     trade_returns = []
     tp1_cnt = tp2_cnt = tp3_cnt = sl_cnt = 0
-    equity = 1.0
-    peak_eq = 1.0
+    equity = peak_eq = 1.0
     max_dd = 0.0
     fee_rate = fee_bps / 10000.0
 
     for i in range(warmup, len(df) - 1):
         if not np.isfinite(atr_v[i]) or atr_v[i] <= 0:
             continue
-
         if not in_trade:
-            # เงื่อนไขเข้า: เทรนด์บวก (pts >= 2) และราคาปิดย่อใกล้ EMA20 (ไม่ไล่ราคาเกิน 1.5%)
-            if pts_v[i] >= 2 and lows_v[i] <= e20_v[i] * 1.015 and closes_v[i] >= e20_v[i] * 0.985:
+            if pts[i] >= 2 and lows_v[i] <= e20_v[i] * 1.015 and closes_v[i] >= e20_v[i] * 0.985:
                 in_trade = True
                 entry_p = closes_v[i]
                 risk = max(1.35 * atr_v[i], entry_p * 0.015)
                 sl_p = entry_p - risk
-                tp1_p = entry_p + 1.5 * risk
-                tp2_p = entry_p + 2.5 * risk
-                tp3_p = entry_p + 4.0 * risk
-                tp1_hit = False
-                tp2_hit = False
+                tp1_p, tp2_p, tp3_p = entry_p + 1.5 * risk, entry_p + 2.5 * risk, entry_p + 4.0 * risk
+                tp1_hit = tp2_hit = False
         else:
-            # ตรวจผลในแท่งถัดไปแบบ Conservative (เช็ก SL ก่อน TP หากเกิดในแท่งเดียวกัน)
-            b_low = lows_v[i]
-            b_high = highs_v[i]
+            b_low, b_high = lows_v[i], highs_v[i]
             realized_ret = None
-
             if b_low <= sl_p:
                 if tp2_hit:
-                    # เก็บ TP1 (1/3) + TP2 (1/3) + ไม้ 3 โดน SL (1/3)
-                    r1 = (tp1_p - entry_p) / entry_p
-                    r2 = (tp2_p - entry_p) / entry_p
-                    r3 = (sl_p - entry_p) / entry_p
-                    realized_ret = (r1 + r2 + r3) / 3.0 - fee_rate
+                    realized_ret = ((tp1_p - entry_p) + (tp2_p - entry_p) + (sl_p - entry_p)) / (3.0 * entry_p) - fee_rate
                 elif tp1_hit:
-                    r1 = (tp1_p - entry_p) / entry_p
-                    r23 = (sl_p - entry_p) / entry_p
-                    realized_ret = (r1 + 2.0 * r23) / 3.0 - fee_rate
+                    realized_ret = ((tp1_p - entry_p) + 2.0 * (sl_p - entry_p)) / (3.0 * entry_p) - fee_rate
                 else:
                     realized_ret = (sl_p - entry_p) / entry_p - fee_rate
                     sl_cnt += 1
@@ -494,10 +620,7 @@ def run_axion_backtest(symbol, period="10y", fee_bps=10.0):
                     tp2_cnt += 1
                 if b_high >= tp3_p:
                     tp3_cnt += 1
-                    r1 = (tp1_p - entry_p) / entry_p
-                    r2 = (tp2_p - entry_p) / entry_p
-                    r3 = (tp3_p - entry_p) / entry_p
-                    realized_ret = (r1 + r2 + r3) / 3.0 - fee_rate
+                    realized_ret = ((tp1_p - entry_p) + (tp2_p - entry_p) + (tp3_p - entry_p)) / (3.0 * entry_p) - fee_rate
                     in_trade = False
 
             if realized_ret is not None:
@@ -513,18 +636,14 @@ def run_axion_backtest(symbol, period="10y", fee_bps=10.0):
     wins = [r for r in trade_returns if r > 0]
     losses = [r for r in trade_returns if r <= 0]
     win_rate = (len(wins) / n_trades * 100.0) if n_trades > 0 else 0.0
-    gross_profit = sum(wins)
-    gross_loss = abs(sum(losses))
+    gross_profit, gross_loss = sum(wins), abs(sum(losses))
     profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (99.9 if gross_profit > 0 else 0.0)
     net_ret_pct = (equity - 1.0) * 100.0
-
-    start_date = df.index[0].strftime("%Y-%m")
-    end_date = df.index[-1].strftime("%Y-%m")
     years_actual = max((df.index[-1] - df.index[0]).days / 365.25, 0.1)
 
     return {
         "symbol": symbol,
-        "period_str": f"{start_date} ถึง {end_date} ({years_actual:.1f}Y)",
+        "period_str": f"{df.index[0].strftime('%Y-%m')} ถึง {df.index[-1].strftime('%Y-%m')} ({years_actual:.1f}Y)",
         "bars": len(df),
         "forecast": forecast_metrics,
         "balanced_acc": f"{avg_bal_acc:.1f}%",
@@ -541,10 +660,7 @@ def run_axion_backtest(symbol, period="10y", fee_bps=10.0):
 def build_backtest_flex_card(bt):
     def row_item(label, val, val_color="#0F172A"):
         return {
-            "type": "box",
-            "layout": "horizontal",
-            "paddingTop": "5px",
-            "paddingBottom": "5px",
+            "type": "box", "layout": "horizontal", "paddingTop": "5px", "paddingBottom": "5px",
             "contents": [
                 {"type": "text", "text": label, "size": "xs", "color": "#475569", "flex": 6},
                 {"type": "text", "text": str(val), "size": "xs", "weight": "bold", "color": val_color, "align": "end", "flex": 4}
@@ -552,30 +668,17 @@ def build_backtest_flex_card(bt):
         }
 
     bubble_dict = {
-        "type": "bubble",
-        "size": "mega",
+        "type": "bubble", "size": "mega",
         "body": {
-            "type": "box",
-            "layout": "vertical",
-            "backgroundColor": "#FFFFFF",
-            "paddingAll": "18px",
+            "type": "box", "layout": "vertical", "backgroundColor": "#FFFFFF", "paddingAll": "18px",
             "contents": [
                 {
-                    "type": "box",
-                    "layout": "horizontal",
-                    "alignItems": "center",
+                    "type": "box", "layout": "horizontal", "alignItems": "center",
                     "contents": [
                         {"type": "text", "text": "AXION BACKTEST AUDITOR", "weight": "bold", "size": "sm", "color": "#0F172A", "flex": 7},
                         {
-                            "type": "box",
-                            "layout": "vertical",
-                            "backgroundColor": "#DBEAFE",
-                            "cornerRadius": "99px",
-                            "paddingTop": "3px",
-                            "paddingBottom": "3px",
-                            "paddingStart": "8px",
-                            "paddingEnd": "8px",
-                            "flex": 0,
+                            "type": "box", "layout": "vertical", "backgroundColor": "#DBEAFE", "cornerRadius": "99px",
+                            "paddingTop": "3px", "paddingBottom": "3px", "paddingStart": "8px", "paddingEnd": "8px", "flex": 0,
                             "contents": [{"type": "text", "text": "10Y BOTH", "size": "xxs", "weight": "bold", "color": "#1E40AF"}]
                         }
                     ]
@@ -583,7 +686,6 @@ def build_backtest_flex_card(bt):
                 {"type": "text", "text": f"{bt['symbol']}", "size": "xxl", "weight": "bold", "color": "#0F172A", "margin": "sm"},
                 {"type": "text", "text": f"ช่วงข้อมูลจริง: {bt['period_str']} ({bt['bars']} แท่ง)", "size": "xxs", "color": "#64748B", "margin": "xs"},
                 {"type": "separator", "margin": "md", "color": "#E2E8F0"},
-
                 {"type": "text", "text": "1. Forecast Direction Accuracy (Walk-Forward)", "size": "xs", "weight": "bold", "color": "#0F172A", "margin": "md"},
                 row_item("Daily (1 วัน)", bt["forecast"]["Daily"]["acc"]),
                 row_item("Weekly (5 วัน)", bt["forecast"]["Weekly"]["acc"]),
@@ -592,7 +694,6 @@ def build_backtest_flex_card(bt):
                 row_item("Balanced Accuracy", bt["balanced_acc"], "#059669"),
                 row_item("Out-of-Sample Total", f"{bt['total_oos']:,} ตัวอย่าง"),
                 {"type": "separator", "margin": "md", "color": "#E2E8F0"},
-
                 {"type": "text", "text": "2. Trading Simulation (Entry / TP1-3 / SL)", "size": "xs", "weight": "bold", "color": "#0F172A", "margin": "md"},
                 row_item("จำนวนรอบเทรด (Trades)", f"{bt['trades']} รอบ"),
                 row_item("Win Rate", bt["win_rate"], "#059669"),
@@ -600,44 +701,28 @@ def build_backtest_flex_card(bt):
                 row_item("Net Return (หักค่าคอม)", bt["net_return"], bt["net_ret_color"]),
                 row_item("Max Drawdown", bt["max_dd"], "#DC2626"),
                 {
-                    "type": "box",
-                    "layout": "vertical",
-                    "margin": "sm",
-                    "backgroundColor": "#F8FAFC",
-                    "cornerRadius": "8px",
-                    "paddingAll": "8px",
-                    "contents": [
-                        {"type": "text", "text": bt["tp_sl_detail"], "size": "xxs", "color": "#334155", "align": "center"}
-                    ]
+                    "type": "box", "layout": "vertical", "margin": "sm", "backgroundColor": "#F8FAFC", "cornerRadius": "8px", "paddingAll": "8px",
+                    "contents": [{"type": "text", "text": bt["tp_sl_detail"], "size": "xxs", "color": "#334155", "align": "center"}]
                 },
                 {"type": "text", "text": "หมายเหตุ: ผลทดสอบย้อนหลัง (No Look-ahead) ไม่รับประกันผลตอบแทนในอนาคต", "size": "xxs", "color": "#B45309", "wrap": True, "margin": "md"}
             ]
         }
     }
-    return FlexMessage(
-        alt_text=f"Axion Backtest 10Y: {bt['symbol']}",
-        contents=FlexContainer.from_dict(bubble_dict),
-        quick_reply=get_quick_reply_buttons(bt['symbol'])
-    )
+    return FlexMessage(alt_text=f"Axion Backtest 10Y: {bt['symbol']}", contents=FlexContainer.from_dict(bubble_dict), quick_reply=get_quick_reply_buttons(bt['symbol']))
 
 # ==========================================
 # ส่วนที่ 3: SMC & วิเคราะห์หุ้นรายตัว
 # ==========================================
 def analyze_leorio_smc(df, atr_val, ema_200):
     smc = {
-        "structure": "Sideway / รอเลือกทาง",
-        "is_bullish_shift": False,
-        "liquidity_sweep": False,
-        "demand_zone": None, "supply_zone": None,
-        "bull_ob": None, "bear_ob": None,
-        "bull_fvg": None, "bear_fvg": None
+        "structure": "Sideway / รอเลือกทาง", "is_bullish_shift": False, "liquidity_sweep": False,
+        "demand_zone": None, "supply_zone": None, "bull_ob": None, "bear_ob": None, "bull_fvg": None, "bear_fvg": None
     }
     if len(df) < 30:
         return smc
     opens, highs, lows, closes = df['Open'].values, df['High'].values, df['Low'].values, df['Close'].values
     curr_price = float(closes[-1])
-    prev_swing_high = float(np.max(highs[-25:-5]))
-    prev_swing_low = float(np.min(lows[-25:-5]))
+    prev_swing_high, prev_swing_low = float(np.max(highs[-25:-5])), float(np.min(lows[-25:-5]))
 
     if curr_price > prev_swing_high:
         smc["structure"] = "BOS ขาขึ้น" if curr_price >= ema_200 else "CHOCH ขาขึ้น"
@@ -675,7 +760,6 @@ def analyze_leorio_smc(df, atr_val, ema_200):
         if highs[i] < lows[i - 2] and (lows[i - 2] - highs[i]) >= 0.15 * atr_val:
             if smc["bear_fvg"] is None and curr_price <= lows[i - 2]:
                 smc["bear_fvg"] = float((lows[i - 2] + highs[i]) / 2.0)
-
     return smc
 
 def build_confluence_zones(candidates, current_price, atr_val, is_support=True, rsi_val=50, rvol=1.0, macd_turning_up=False, is_uptrend=True, has_bull_shift=False):
@@ -727,8 +811,7 @@ def get_pro_stock_data(symbol, interval="1d", include_meta=True):
             alt_symbol = f"{symbol}.BK"
             alt_df = fetch_clean_history(alt_symbol, period=period, interval=interval)
             if alt_df is not None and len(alt_df) >= 15:
-                symbol = alt_symbol
-                df = alt_df
+                symbol, df = alt_symbol, alt_df
         if df is None or len(df) < 30:
             return None
 
@@ -742,10 +825,8 @@ def get_pro_stock_data(symbol, interval="1d", include_meta=True):
         prev_close = float(df['Close'].iloc[-2]) if len(df) >= 2 else current_price
         price_change = ((current_price - prev_close) / prev_close) * 100 if prev_close > 0 else 0.0
 
-        day_low = float(df_daily['Low'].iloc[-1])
-        day_high = float(df_daily['High'].iloc[-1])
-        w52_low = float(df_daily['Low'].tail(252).min())
-        w52_high = float(df_daily['High'].tail(252).max())
+        day_low, day_high = float(df_daily['Low'].iloc[-1]), float(df_daily['High'].iloc[-1])
+        w52_low, w52_high = float(df_daily['Low'].tail(252).min()), float(df_daily['High'].tail(252).max())
 
         rsi_val = calculate_wilder_rsi(df['Close'], 14)
         atr_val = calculate_atr(df, 14)
@@ -755,46 +836,31 @@ def get_pro_stock_data(symbol, interval="1d", include_meta=True):
         ema_50 = float(context_df['Close'].ewm(span=50, adjust=False).mean().iloc[-1])
         ema_200 = float(context_df['Close'].ewm(span=200, adjust=False).mean().iloc[-1])
 
-        ema_12 = df['Close'].ewm(span=12, adjust=False).mean()
-        ema_26 = df['Close'].ewm(span=26, adjust=False).mean()
+        ema_12, ema_26 = df['Close'].ewm(span=12, adjust=False).mean(), df['Close'].ewm(span=26, adjust=False).mean()
         macd_hist = (ema_12 - ema_26) - (ema_12 - ema_26).ewm(span=9, adjust=False).mean()
         macd_turning_up = bool(macd_hist.iloc[-1] > macd_hist.iloc[-2]) if len(macd_hist) >= 2 else False
 
         vol_avg_20 = float(df['Volume'].tail(20).mean())
-        curr_vol = float(df['Volume'].iloc[-1])
-        rvol = (curr_vol / vol_avg_20) if vol_avg_20 > 0 else 1.0
+        rvol = (float(df['Volume'].iloc[-1]) / vol_avg_20) if vol_avg_20 > 0 else 1.0
         poc_price = calculate_volume_poc(df)
-
         smc = analyze_leorio_smc(df, atr_val, ema_200)
         is_uptrend = current_price >= ema_200
 
         raw_supports = []
-        if ema_50 < current_price:
-            raw_supports.append({'price': ema_50, 'label': 'EMA 50', 'weight': 10})
-        if ema_200 < current_price:
-            raw_supports.append({'price': ema_200, 'label': 'EMA 200', 'weight': 16})
-        if poc_price < current_price:
-            raw_supports.append({'price': poc_price, 'label': 'POC', 'weight': 13})
-        if smc["demand_zone"] and smc["demand_zone"] < current_price:
-            raw_supports.append({'price': smc["demand_zone"], 'label': 'Demand Zone', 'weight': 15})
-        if smc["bull_ob"] and smc["bull_ob"] < current_price:
-            raw_supports.append({'price': smc["bull_ob"], 'label': 'Bullish OB', 'weight': 16})
-        if smc["bull_fvg"] and smc["bull_fvg"] < current_price:
-            raw_supports.append({'price': smc["bull_fvg"], 'label': 'Bullish FVG', 'weight': 14})
+        if ema_50 < current_price: raw_supports.append({'price': ema_50, 'label': 'EMA 50', 'weight': 10})
+        if ema_200 < current_price: raw_supports.append({'price': ema_200, 'label': 'EMA 200', 'weight': 16})
+        if poc_price < current_price: raw_supports.append({'price': poc_price, 'label': 'POC', 'weight': 13})
+        if smc["demand_zone"] and smc["demand_zone"] < current_price: raw_supports.append({'price': smc["demand_zone"], 'label': 'Demand Zone', 'weight': 15})
+        if smc["bull_ob"] and smc["bull_ob"] < current_price: raw_supports.append({'price': smc["bull_ob"], 'label': 'Bullish OB', 'weight': 16})
+        if smc["bull_fvg"] and smc["bull_fvg"] < current_price: raw_supports.append({'price': smc["bull_fvg"], 'label': 'Bullish FVG', 'weight': 14})
 
         raw_resistances = []
-        if ema_50 > current_price:
-            raw_resistances.append({'price': ema_50, 'label': 'EMA 50', 'weight': 10})
-        if ema_200 > current_price:
-            raw_resistances.append({'price': ema_200, 'label': 'EMA 200', 'weight': 16})
-        if poc_price > current_price:
-            raw_resistances.append({'price': poc_price, 'label': 'POC', 'weight': 13})
-        if smc["supply_zone"] and smc["supply_zone"] > current_price:
-            raw_resistances.append({'price': smc["supply_zone"], 'label': 'Supply Zone', 'weight': 15})
-        if smc["bear_ob"] and smc["bear_ob"] > current_price:
-            raw_resistances.append({'price': smc["bear_ob"], 'label': 'Bearish OB', 'weight': 16})
-        if smc["bear_fvg"] and smc["bear_fvg"] > current_price:
-            raw_resistances.append({'price': smc["bear_fvg"], 'label': 'Bearish FVG', 'weight': 14})
+        if ema_50 > current_price: raw_resistances.append({'price': ema_50, 'label': 'EMA 50', 'weight': 10})
+        if ema_200 > current_price: raw_resistances.append({'price': ema_200, 'label': 'EMA 200', 'weight': 16})
+        if poc_price > current_price: raw_resistances.append({'price': poc_price, 'label': 'POC', 'weight': 13})
+        if smc["supply_zone"] and smc["supply_zone"] > current_price: raw_resistances.append({'price': smc["supply_zone"], 'label': 'Supply Zone', 'weight': 15})
+        if smc["bear_ob"] and smc["bear_ob"] > current_price: raw_resistances.append({'price': smc["bear_ob"], 'label': 'Bearish OB', 'weight': 16})
+        if smc["bear_fvg"] and smc["bear_fvg"] > current_price: raw_resistances.append({'price': smc["bear_fvg"], 'label': 'Bearish FVG', 'weight': 14})
 
         sup_zones = build_confluence_zones(raw_supports, current_price, atr_val, True, rsi_val, rvol, macd_turning_up, is_uptrend, smc["is_bullish_shift"])
         res_zones = build_confluence_zones(raw_resistances, current_price, atr_val, False, rsi_val, rvol, macd_turning_up, is_uptrend, smc["is_bullish_shift"])
@@ -805,13 +871,9 @@ def get_pro_stock_data(symbol, interval="1d", include_meta=True):
         best_entry = sup_zones[0]['price']
         risk_unit = max(1.35 * atr_val, best_entry * 0.015)
         stop_loss = best_entry - risk_unit
-
-        tp1_atr = best_entry + (1.5 * risk_unit)
-        tp2_atr = best_entry + (2.5 * risk_unit)
-        tp3_atr = best_entry + (4.0 * risk_unit)
-        tp1 = max(tp1_atr, res_zones[0]['price'] * 0.995) if len(res_zones) >= 1 else tp1_atr
-        tp2 = max(tp1 + risk_unit, res_zones[1]['price']) if len(res_zones) >= 2 else max(tp1 + risk_unit, tp2_atr)
-        tp3 = max(tp2 + risk_unit, res_zones[2]['price']) if len(res_zones) >= 3 else max(tp2 + risk_unit, tp3_atr)
+        tp1 = max(best_entry + 1.5 * risk_unit, res_zones[0]['price'] * 0.995) if len(res_zones) >= 1 else best_entry + 1.5 * risk_unit
+        tp2 = max(tp1 + risk_unit, res_zones[1]['price']) if len(res_zones) >= 2 else max(tp1 + risk_unit, best_entry + 2.5 * risk_unit)
+        tp3 = max(tp2 + risk_unit, res_zones[2]['price']) if len(res_zones) >= 3 else max(tp2 + risk_unit, best_entry + 4.0 * risk_unit)
 
         rr_ratio = (tp2 - best_entry) / max(best_entry - stop_loss, 0.01)
         max_score = int(max(s['setup_score'] for s in sup_zones[:3]))
@@ -829,76 +891,50 @@ def get_pro_stock_data(symbol, interval="1d", include_meta=True):
         mtf_total = sum(v["score"] for v in mtf.values())
 
         if mtf_total >= 4 and max_score >= 65:
-            decision = "BULLISH SETUP"
-            dec_color = "#059669"
-            dec_desc = f"แนวโน้มหลายกรอบเวลาเป็นบวก โซนรับอ้างอิง {best_entry:,.2f}"
+            decision, dec_color, dec_desc = "BULLISH SETUP", "#059669", f"แนวโน้มหลายกรอบเวลาเป็นบวก โซนรับอ้างอิง {best_entry:,.2f}"
         elif mtf_total >= 1:
-            decision = "BULLISH BIAS / WAIT"
-            dec_color = "#10B981"
-            dec_desc = f"แนวโน้มเอนเอียงบวก รอจังหวะย่อใกล้ {sup_zones[0]['label']} ({best_entry:,.2f})"
+            decision, dec_color, dec_desc = "BULLISH BIAS / WAIT", "#10B981", f"แนวโน้มเอนเอียงบวก รอจังหวะย่อใกล้ {sup_zones[0]['label']} ({best_entry:,.2f})"
         elif mtf_total <= -3:
-            decision = "BEARISH BIAS / CAUTION"
-            dec_color = "#DC2626"
-            dec_desc = f"โครงสร้างอ่อนแรง ({smc['structure']}) ระวังความเสี่ยง"
+            decision, dec_color, dec_desc = "BEARISH BIAS / CAUTION", "#DC2626", f"โครงสร้างอ่อนแรง ({smc['structure']}) ระวังความเสี่ยง"
         else:
-            decision = "HOLD / WAIT"
-            dec_color = "#D97706"
-            dec_desc = f"ทิศทางยังไม่ชัดเจน รอสัญญาณยืนยันที่ {best_entry:,.2f}"
+            decision, dec_color, dec_desc = "HOLD / WAIT", "#D97706", f"ทิศทางยังไม่ชัดเจน รอสัญญาณยืนยันที่ {best_entry:,.2f}"
 
-        cur_sym = meta["currency_sym"]
-        fv_val = meta["fair_value"]
+        cur_sym, fv_val = meta["currency_sym"], meta["fair_value"]
         if fv_val and fv_val > 0:
             upside_pct = ((fv_val - current_price) / current_price) * 100
-            up_sign = "+" if upside_pct >= 0 else ""
             fv_str = f"{cur_sym}{fv_val:,.2f}"
-            fv_sub = f"{up_sign}{upside_pct:.1f}% ({meta['fv_note']})"
+            fv_sub = f"{'+' if upside_pct >= 0 else ''}{upside_pct:.1f}% ({meta['fv_note']})"
             fv_color = "#059669" if upside_pct >= 0 else "#DC2626"
         else:
-            fv_str = f"{cur_sym}—"
-            fv_sub = "รอข้อมูลงบ"
-            fv_color = "#64748B"
-
-        change_sign = "+" if price_change >= 0 else ""
-        change_color = "#059669" if price_change >= 0 else "#DC2626"
+            fv_str, fv_sub, fv_color = f"{cur_sym}—", "รอข้อมูลงบ", "#64748B"
 
         return {
             "symbol": symbol,
             "company_meta": f"{meta['company_name']} · {meta['exchange']} · {meta['currency']}",
             "interval": interval.upper(),
-            "raw_price": current_price,
-            "raw_sup1": sup_zones[0],
+            "raw_price": current_price, "raw_sup1": sup_zones[0],
             "price_main": f"{cur_sym}{current_price:,.2f}",
             "price_str": f"{current_price:,.2f} {meta['currency']}",
-            "change_str": f"{change_sign}{price_change:.2f}%",
-            "change_color": change_color,
+            "change_str": f"{'+' if price_change >= 0 else ''}{price_change:.2f}%",
+            "change_color": "#059669" if price_change >= 0 else "#DC2626",
             "after_hours_str": f"After-Hours: {cur_sym}{meta['after_hours']:,.2f}" if meta["after_hours"] else f"Day: {day_low:,.2f} - {day_high:,.2f}",
             "w52_str": f"52W: {w52_low:,.2f} - {w52_high:,.2f}",
-            "fv_str": fv_str,
-            "fv_sub": fv_sub,
-            "fv_color": fv_color,
-            "setup_score": f"{max_score}/100",
-            "score_int": max_score,
-            "rsi_str": f"{rsi_val:.1f}",
-            "mtf": mtf,
-            "decision": decision,
-            "dec_color": dec_color,
-            "dec_desc": dec_desc,
+            "fv_str": fv_str, "fv_sub": fv_sub, "fv_color": fv_color,
+            "setup_score": f"{max_score}/100", "score_int": max_score, "rsi_str": f"{rsi_val:.1f}",
+            "mtf": mtf, "decision": decision, "dec_color": dec_color, "dec_desc": dec_desc,
             "supports": [
                 f"{sup_zones[0]['price']:,.2f} [Score {sup_zones[0]['setup_score']}] • {sup_zones[0]['label']}",
                 (f"{sup_zones[1]['price']:,.2f} [Score {sup_zones[1]['setup_score']}] • {sup_zones[1]['label']}"
                  if len(sup_zones) > 1 else "ไม่มีแนวรับถัดไปที่ยืนยันได้")
             ],
-            "setup_str": (
-                f"Entry: {best_entry:,.2f} | SL: {stop_loss:,.2f} (R:R 1:{rr_ratio:.1f})\n"
-                f"TP1: {tp1:,.2f} | TP2: {tp2:,.2f} | TP3: {tp3:,.2f}"
-            )
+            "setup_str": f"Entry: {best_entry:,.2f} | SL: {stop_loss:,.2f} (R:R 1:{rr_ratio:.1f})\nTP1: {tp1:,.2f} | TP2: {tp2:,.2f} | TP3: {tp3:,.2f}"
         }
     except Exception as e:
         print(f"Error analyzing {symbol}: {e}")
         return None
 
 # ==========================================
-# ส่วนที่ 4: Dashboard Flex Card (สไตล์ Smart Stock Analyzer)
+# ส่วนที่ 4: Dashboard Flex Card
 # ==========================================
 def build_flex_card(data):
     score_int = data["score_int"]
@@ -907,10 +943,7 @@ def build_flex_card(data):
 
     def mtf_row(label, item):
         return {
-            "type": "box",
-            "layout": "horizontal",
-            "paddingTop": "6px",
-            "paddingBottom": "6px",
+            "type": "box", "layout": "horizontal", "paddingTop": "6px", "paddingBottom": "6px",
             "contents": [
                 {"type": "text", "text": label, "size": "xs", "color": "#334155", "flex": 3},
                 {"type": "text", "text": item["dir"], "size": "xs", "color": item["color"], "weight": "bold", "flex": 5},
@@ -919,30 +952,17 @@ def build_flex_card(data):
         }
 
     bubble_dict = {
-        "type": "bubble",
-        "size": "mega",
+        "type": "bubble", "size": "mega",
         "body": {
-            "type": "box",
-            "layout": "vertical",
-            "backgroundColor": "#FFFFFF",
-            "paddingAll": "18px",
+            "type": "box", "layout": "vertical", "backgroundColor": "#FFFFFF", "paddingAll": "18px",
             "contents": [
                 {
-                    "type": "box",
-                    "layout": "horizontal",
-                    "alignItems": "center",
+                    "type": "box", "layout": "horizontal", "alignItems": "center",
                     "contents": [
                         {"type": "text", "text": "AXION SMART ANALYZER", "weight": "bold", "size": "sm", "color": "#0F172A", "flex": 6},
                         {
-                            "type": "box",
-                            "layout": "vertical",
-                            "backgroundColor": badge_bg,
-                            "cornerRadius": "99px",
-                            "paddingTop": "3px",
-                            "paddingBottom": "3px",
-                            "paddingStart": "10px",
-                            "paddingEnd": "10px",
-                            "flex": 0,
+                            "type": "box", "layout": "vertical", "backgroundColor": badge_bg, "cornerRadius": "99px",
+                            "paddingTop": "3px", "paddingBottom": "3px", "paddingStart": "10px", "paddingEnd": "10px", "flex": 0,
                             "contents": [{"type": "text", "text": f"Score {data['setup_score']}", "size": "xxs", "weight": "bold", "color": badge_txt}]
                         }
                     ]
@@ -951,18 +971,10 @@ def build_flex_card(data):
                 {"type": "text", "text": f"{data['symbol']} ({data['interval']})", "size": "xxl", "weight": "bold", "color": "#0F172A"},
                 {"type": "text", "text": data["company_meta"], "size": "xs", "color": "#64748B", "margin": "xs", "wrap": True},
                 {
-                    "type": "box",
-                    "layout": "horizontal",
-                    "margin": "lg",
-                    "spacing": "md",
-                    "backgroundColor": "#F8FAFC",
-                    "cornerRadius": "12px",
-                    "paddingAll": "12px",
+                    "type": "box", "layout": "horizontal", "margin": "lg", "spacing": "md", "backgroundColor": "#F8FAFC", "cornerRadius": "12px", "paddingAll": "12px",
                     "contents": [
                         {
-                            "type": "box",
-                            "layout": "vertical",
-                            "flex": 1,
+                            "type": "box", "layout": "vertical", "flex": 1,
                             "contents": [
                                 {"type": "text", "text": "Market Price", "size": "xxs", "color": "#64748B"},
                                 {"type": "text", "text": data["price_main"], "size": "lg", "weight": "bold", "color": "#0F172A", "margin": "xs"},
@@ -970,9 +982,7 @@ def build_flex_card(data):
                             ]
                         },
                         {
-                            "type": "box",
-                            "layout": "vertical",
-                            "flex": 1,
+                            "type": "box", "layout": "vertical", "flex": 1,
                             "contents": [
                                 {"type": "text", "text": "Valuation Ref.", "size": "xxs", "color": "#64748B"},
                                 {"type": "text", "text": data["fv_str"], "size": "lg", "weight": "bold", "color": "#0F172A", "margin": "xs"},
@@ -984,10 +994,7 @@ def build_flex_card(data):
                 {"type": "text", "text": f"{data['after_hours_str']}  |  {data['w52_str']}", "size": "xxs", "color": "#64748B", "margin": "sm", "wrap": True},
                 {"type": "text", "text": "Multi-Timeframe Forecast", "weight": "bold", "size": "sm", "color": "#0F172A", "margin": "lg"},
                 {
-                    "type": "box",
-                    "layout": "horizontal",
-                    "margin": "sm",
-                    "paddingBottom": "4px",
+                    "type": "box", "layout": "horizontal", "margin": "sm", "paddingBottom": "4px",
                     "contents": [
                         {"type": "text", "text": "ระยะ", "size": "xxs", "weight": "bold", "color": "#475569", "flex": 3},
                         {"type": "text", "text": "ทิศทาง", "size": "xxs", "weight": "bold", "color": "#475569", "flex": 5},
@@ -1007,27 +1014,16 @@ def build_flex_card(data):
                 {"type": "text", "text": data["decision"], "size": "xl", "weight": "bold", "color": data["dec_color"], "margin": "xs"},
                 {"type": "text", "text": data["dec_desc"], "size": "xxs", "color": "#475569", "margin": "xs", "wrap": True},
                 {
-                    "type": "box",
-                    "layout": "vertical",
-                    "margin": "md",
-                    "backgroundColor": "#F8FAFC",
-                    "cornerRadius": "8px",
-                    "paddingAll": "10px",
+                    "type": "box", "layout": "vertical", "margin": "md", "backgroundColor": "#F8FAFC", "cornerRadius": "8px", "paddingAll": "10px",
                     "contents": [{"type": "text", "text": data["setup_str"], "size": "xxs", "color": "#0F172A", "wrap": True}]
                 }
             ]
         },
         "footer": {
-            "type": "box",
-            "layout": "vertical",
-            "spacing": "sm",
-            "paddingAll": "12px",
-            "backgroundColor": "#F8FAFC",
+            "type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "12px", "backgroundColor": "#F8FAFC",
             "contents": [
                 {
-                    "type": "box",
-                    "layout": "horizontal",
-                    "spacing": "sm",
+                    "type": "box", "layout": "horizontal", "spacing": "sm",
                     "contents": [
                         {"type": "button", "style": "primary", "color": "#0F172A", "height": "sm",
                          "action": {"type": "message", "label": "🧪 Backtest 10Y", "text": f"/BACKTEST {data['symbol']}"}},
@@ -1036,12 +1032,10 @@ def build_flex_card(data):
                     ]
                 },
                 {
-                    "type": "box",
-                    "layout": "horizontal",
-                    "spacing": "sm",
+                    "type": "box", "layout": "horizontal", "spacing": "sm",
                     "contents": [
                         {"type": "button", "style": "secondary", "height": "sm",
-                         "action": {"type": "message", "label": "🎯 สแกนรับ", "text": "/SCAN_SUPPORT"}},
+                         "action": {"type": "message", "label": "🥇 ทอง M15", "text": "/GOLD"}},
                         {"type": "button", "style": "secondary", "height": "sm",
                          "action": {"type": "message", "label": "📋 Watchlist", "text": "/LIST"}}
                     ]
@@ -1049,11 +1043,7 @@ def build_flex_card(data):
             ]
         }
     }
-    return FlexMessage(
-        alt_text=f"Axion Dashboard: {data['symbol']} ({data['decision']})",
-        contents=FlexContainer.from_dict(bubble_dict),
-        quick_reply=get_quick_reply_buttons(data['symbol'])
-    )
+    return FlexMessage(alt_text=f"Axion Dashboard: {data['symbol']} ({data['decision']})", contents=FlexContainer.from_dict(bubble_dict), quick_reply=get_quick_reply_buttons(data['symbol']))
 
 # ==========================================
 # ส่วนที่ 5: Strategist & Alert Agent (Discord & LINE)
@@ -1075,7 +1065,6 @@ def scan_and_notify_discord():
             continue
         curr_p, sup1 = data["raw_price"], data["raw_sup1"]
         dist_sup = ((curr_p - sup1["price"]) / max(sup1["price"], 0.01)) * 100
-
         if 0 <= dist_sup <= 2.0 and sup1["setup_score"] >= 68:
             key = f"{sym}_SUP"
             if now_ts - discord_alert_cooldown.get(key, 0) > 6 * 3600:
@@ -1093,14 +1082,23 @@ def scan_and_notify_discord():
 
 @app.route("/", methods=['GET', 'HEAD'])
 def health_check():
-    global last_auto_scan_time
+    global last_auto_scan_time, last_gold_scan_time
     if request.method == 'HEAD':
         return "OK", 200
     now_ts = time.time()
-    if DISCORD_WEBHOOK_URL and (now_ts - last_auto_scan_time > 1800):
-        last_auto_scan_time = now_ts
-        threading.Thread(target=scan_and_notify_discord, daemon=True).start()
+    if DISCORD_WEBHOOK_URL:
+        if now_ts - last_gold_scan_time > 300:
+            last_gold_scan_time = now_ts
+            threading.Thread(target=scan_gold_and_notify_discord, daemon=True).start()
+        if now_ts - last_auto_scan_time > 1800:
+            last_auto_scan_time = now_ts
+            threading.Thread(target=scan_and_notify_discord, daemon=True).start()
     return f"Axion Smart Analyzer v{MODEL_VERSION} is Awake! | Audit rows: {get_forecast_audit_count()}", 200
+
+@app.route("/scan_gold", methods=['GET'])
+def manual_gold_trigger():
+    threading.Thread(target=scan_gold_and_notify_discord, daemon=True).start()
+    return "✅ Axion สั่งสแกนทองคำ M15 (SMC V2.1) เรียบร้อยแล้ว!", 200
 
 @app.route("/scan_discord", methods=['GET'])
 def manual_discord_trigger():
@@ -1136,14 +1134,40 @@ def handle_message(event):
 
     if command in ["/HELP", "HELP"]:
         help_text = (
-            "📖 คู่มือ Axion Smart Analyzer v1.2\n\n"
+            "📖 คู่มือ Axion Smart Analyzer v1.2.1\n\n"
+            "• /GOLD เช็กสถานะทองคำ M15 (สูตร SMC V2.1)\n"
             "• พิมพ์ชื่อหุ้น (เช่น QQQI, RKLB, QCOM) ดู Dashboard\n"
-            "• /BACKTEST [ชื่อหุ้น] ทดสอบย้อนหลัง 10 ปี (Forecast + Trading)\n"
+            "• /BACKTEST [ชื่อหุ้น] ทดสอบย้อนหลัง 10 ปี\n"
             "• +[ชื่อหุ้น] / -[ชื่อหุ้น] เพิ่มหรือลบ Watchlist\n"
             "• /SUMMARY สรุปพอร์ต | /SCAN_SUPPORT สแกนโซนรับ\n"
             "• /LIST ดู Watchlist | /AUDIT ดูสถิติฐานข้อมูล"
         )
         messages_to_reply.append(TextMessage(text=help_text, quick_reply=default_qr))
+
+    elif command in ["/GOLD", "GOLD", "XAUUSD"]:
+        res = analyze_gold_smc_m15("GC=F", "15m")
+        if res:
+            bull_txt = "\n".join([f"  🟢 {z['type']}: {z['bot']:,.2f} - {z['top']:,.2f}" for z in res['bull_zones']]) or "  (ไม่มีโซนรับใกล้เคียง)"
+            bear_txt = "\n".join([f"  🔴 {z['type']}: {z['bot']:,.2f} - {z['top']:,.2f}" for z in res['bear_zones']]) or "  (ไม่มีโซนต้านใกล้เคียง)"
+            if res["signal"]:
+                s = res["signal"]
+                sig_txt = f"⚡ สัญญาณล่าสุด: {s['type']}\nEntry: {s['entry']:,.2f} | SL: {s['sl']:,.2f}\nTP1: {s['tp1']:,.2f} | TP2: {s['tp2']:,.2f} | TP3: {s['tp3']:,.2f}"
+            else:
+                sig_txt = "⏳ ยังไม่เกิดสัญญาณปลายไส้ในแท่งล่าสุด (รอเข้าโซนตามเทรนด์)"
+            gold_msg = (
+                f"🥇 Axion Gold M15 (SMC V2.1)\n"
+                f"ราคาอ้างอิง (GC=F): {res['price']:,.2f}\n"
+                f"เทรนด์หลัก: {res['trend']}\n"
+                f"EMA50: {res['ema50']:,.2f} | EMA200: {res['ema200']:,.2f}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"{sig_txt}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"โซนรอ Buy (FVG/OB):\n{bull_txt}\n"
+                f"โซนรอ Sell (FVG/OB):\n{bear_txt}"
+            )
+            messages_to_reply.append(TextMessage(text=gold_msg, quick_reply=default_qr))
+        else:
+            messages_to_reply.append(TextMessage(text="⚠️ ดึงข้อมูลทองคำ M15 ไม่สำเร็จในขณะนี้", quick_reply=default_qr))
 
     elif command.startswith("/BACKTEST") or command.startswith("BACKTEST"):
         parts = command.split()
@@ -1155,12 +1179,11 @@ def handle_message(event):
             messages_to_reply.append(TextMessage(text=f"⚠️ ข้อมูลย้อนหลังของ '{target_sym}' ไม่เพียงพอสำหรับ Backtest", quick_reply=default_qr))
 
     elif command in ["/WEEKLY_PERF", "WEEKLY_PERF"]:
-        report = evaluate_weekly_performance_from_sheets()
-        messages_to_reply.append(TextMessage(text=report, quick_reply=default_qr))
+        messages_to_reply.append(TextMessage(text=evaluate_weekly_performance_from_sheets(), quick_reply=default_qr))
 
     elif command in ["/AUDIT", "AUDIT"]:
         messages_to_reply.append(TextMessage(
-            text=f"🧾 Axion Forecast Audit\nบันทึก Forecast แล้ว: {get_forecast_audit_count()} รายการ\nModel: {MODEL_VERSION}\nBacktest Engine: 10Y Walk-Forward (Both)",
+            text=f"🧾 Axion Forecast Audit\nบันทึก Forecast แล้ว: {get_forecast_audit_count()} รายการ\nModel: {MODEL_VERSION}\nGold M15 SMC: Active",
             quick_reply=default_qr))
 
     elif command in ["/LIST", "LIST"]:
@@ -1218,10 +1241,8 @@ def handle_message(event):
         stock_name = parts[0]
         tf = "1d"
         if len(parts) > 1:
-            if parts[1] in ["M15", "15M"]:
-                tf = "15m"
-            elif parts[1] in ["H1", "1H", "60M"]:
-                tf = "1h"
+            if parts[1] in ["M15", "15M"]: tf = "15m"
+            elif parts[1] in ["H1", "1H", "60M"]: tf = "1h"
         data = get_pro_stock_data(stock_name, interval=tf, include_meta=True)
         if data:
             messages_to_reply.append(build_flex_card(data))
