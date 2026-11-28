@@ -13,7 +13,7 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage
 # ==========================================
 # 1. การตั้งค่าหลัก & Environment Variables
 # ==========================================
-MODEL_VERSION = "1.5.3-issue-8"
+MODEL_VERSION = "1.5.4-issue-10"
 
 app = Flask(__name__)
 
@@ -491,6 +491,14 @@ if handler:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
             return
 
+        # คำสั่งทดสอบการตอบสนองบอท
+        if text_lower == "/ping":
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="pong")
+            )
+            return
+
         # คำสั่งเช็คเวอร์ชันบอท
         if text_lower == "/version":
             line_bot_api.reply_message(
@@ -554,6 +562,7 @@ if handler:
         if text_lower in ["/help", "help", "คำสั่ง"]:
             help_txt = (
                 "🤖 AXION QUANT CORE V1.5 UNIVERSAL\n"
+                "• /ping — ทดสอบการตอบสนองของบอท (pong)\n"
                 "• /version — เช็คเวอร์ชันปัจจุบันของบอท\n"
                 "• myid — ดู LINE_USER_ID ของคุณ\n"
                 "• /scan — เช็กคะแนนทุกตัวพร้อมกัน\n"
