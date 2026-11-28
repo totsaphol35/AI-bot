@@ -41,27 +41,35 @@ payload = {
     "generationConfig": {"temperature": 0.2}
 }
 
-models = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
+models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-3.8-flash"]
 res = None
 
 for model_name in models:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
     print(f"Trying model: {model_name}...")
     for attempt in range(1, 3):
-        res = requests.post(url, json=payload, timeout=120)
-        if res.ok:
-            print(f"Success with {model_name}!")
-            break
-        print(f"Model {model_name} failed ({res.status_code}).")
-        if res.status_code in (429, 500, 503, 504) and attempt < 2:
-            time.sleep(10)
-        else:
-            break
+        try:
+            res = requests.post(url, json=payload, timeout=300)
+            if res.ok:
+                print(f"Success with {model_name}!")
+                break
+            print(f"Model {model_name} failed ({res.status_code}).")
+            if res.status_code in (429, 500, 503, 504) and attempt < 2:
+                time.sleep(10)
+            else:
+                break
+        except requests.exceptions.RequestException as e:
+            print(f"Model {model_name} network/timeout error: {e}")
+            res = None
+            if attempt < 2:
+                time.sleep(5)
+            else:
+                break
     if res and res.ok:
         break
 
 if not res or not res.ok:
-    print(f"All models failed. Last error ({res.status_code if res else 'N/A'}): {res.text if res else ''}")
+    print(f"All models failed. Last error ({res.status_code if res else 'Timeout/Network'}): {res.text if res else ''}")
     sys.exit(1)
 
 raw_text = res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
