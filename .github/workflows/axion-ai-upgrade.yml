@@ -1,0 +1,88 @@
+name: Axion AI Auto-Upgrade
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  ai-upgrade:
+    if: startsWith(github.event.issue.title, '[UPGRADE]')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: Run AI Upgrader & Syntax Check
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUM: ${{ github.event.issue.number }}
+        run: python scripts/ai_upgrader.py
+
+      - name: Create Branch & Pull Request
+        id: create_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUM: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          BRANCH="ai-upgrade-issue-${ISSUE_NUM}"
+          git config user.name "Axion AI Bot"
+          git config user.email "bot@axion.local"
+          git checkout -b "$BRANCH"
+          git add app.py
+          git commit -m "AI Upgrade: ${ISSUE_TITLE} (#${ISSUE_NUM})"
+          git push origin "$BRANCH"
+          PR_URL=$(gh pr create \
+            --title "🤖 ${ISSUE_TITLE}" \
+            --body "อัปเกรดอัตโนมัติจาก Issue #${ISSUE_NUM} (ผ่านการตรวจ Syntax แล้ว) กรุณาตรวจสอบและกด **Merge** เพื่อ Deploy ขึ้น Render" \
+            --base main \
+            --head "$BRANCH")
+          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+
+      - name: Notify LINE & Discord for Approval
+        env:
+          PR_URL: ${{ steps.create_pr.outputs.pr_url }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          LINE_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_UID: ${{ secrets.LINE_USER_ID }}
+          DISCORD_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          python -c '
+          import os, requests
+
+          pr_url = os.getenv("PR_URL")
+          title = os.getenv("ISSUE_TITLE")
+          msg = (
+              f"🛠️ AXION AI UPGRADE รออนุมัติ\n"
+              f"รายการ: {title}\n"
+              f"สถานะ: เขียนโค้ด & เช็ก Syntax ผ่านแล้ว ✅\n"
+              f"━━━━━━━━━━━━━━\n"
+              f"👉 กดตรวจสอบและอนุมัติ (Merge):\n{pr_url}"
+          )
+
+          if os.getenv("LINE_TOKEN") and os.getenv("LINE_UID"):
+              requests.post(
+                  "https://api.line.me/v2/bot/message/push",
+                  headers={"Authorization": f"Bearer {os.getenv(\"LINE_TOKEN\")}", "Content-Type": "application/json"},
+                  json={"to": os.getenv("LINE_UID"), "messages": [{"type": "text", "text": msg}]}
+              )
+
+          if os.getenv("DISCORD_URL"):
+              requests.post(os.getenv("DISCORD_URL"), json={"content": msg})
+          '
