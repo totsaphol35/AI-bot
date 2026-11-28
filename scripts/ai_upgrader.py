@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import py_compile
 import requests
 
@@ -41,10 +42,18 @@ payload = {
     "generationConfig": {"temperature": 0.2}
 }
 
-res = requests.post(url, json=payload, timeout=120)
-if not res.ok:
-    print(f"Gemini API Error ({res.status_code}): {res.text}")
-    sys.exit(1)
+res = None
+for attempt in range(1, 6):
+    res = requests.post(url, json=payload, timeout=120)
+    if res.ok:
+        break
+    if res.status_code in (429, 500, 503, 504) and attempt < 5:
+        wait_sec = attempt * 15
+        print(f"Gemini API busy ({res.status_code}). Retrying in {wait_sec}s (attempt {attempt}/5)...")
+        time.sleep(wait_sec)
+    else:
+        print(f"Gemini API Error ({res.status_code}): {res.text}")
+        sys.exit(1)
 
 raw_text = res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
 
