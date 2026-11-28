@@ -36,24 +36,33 @@ prompt = (
     f"ส่วนที่ 2: โค้ด Python ฉบับเต็มของไฟล์ {TARGET_FILE} ห้ามใส่เครื่องหมาย Markdown code block ครอบโค้ด\n"
 )
 
-url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={GEMINI_API_KEY}"
 payload = {
     "contents": [{"parts": [{"text": prompt}]}],
     "generationConfig": {"temperature": 0.2}
 }
 
+models = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
 res = None
-for attempt in range(1, 6):
-    res = requests.post(url, json=payload, timeout=120)
-    if res.ok:
+
+for model_name in models:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+    print(f"Trying model: {model_name}...")
+    for attempt in range(1, 3):
+        res = requests.post(url, json=payload, timeout=120)
+        if res.ok:
+            print(f"Success with {model_name}!")
+            break
+        print(f"Model {model_name} failed ({res.status_code}).")
+        if res.status_code in (429, 500, 503, 504) and attempt < 2:
+            time.sleep(10)
+        else:
+            break
+    if res and res.ok:
         break
-    if res.status_code in (429, 500, 503, 504) and attempt < 5:
-        wait_sec = attempt * 15
-        print(f"Gemini API busy ({res.status_code}). Retrying in {wait_sec}s (attempt {attempt}/5)...")
-        time.sleep(wait_sec)
-    else:
-        print(f"Gemini API Error ({res.status_code}): {res.text}")
-        sys.exit(1)
+
+if not res or not res.ok:
+    print(f"All models failed. Last error ({res.status_code if res else 'N/A'}): {res.text if res else ''}")
+    sys.exit(1)
 
 raw_text = res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
 
