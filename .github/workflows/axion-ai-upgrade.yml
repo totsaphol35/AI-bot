@@ -44,10 +44,10 @@ jobs:
           BRANCH="ai-upgrade-issue-${ISSUE_NUM}"
           git config user.name "Axion AI Bot"
           git config user.email "bot@axion.local"
-          git checkout -b "$BRANCH"
+          git checkout -B "$BRANCH"
           git add app.py
           git commit -m "AI Upgrade: ${ISSUE_TITLE} (#${ISSUE_NUM})"
-          git push origin "$BRANCH"
+          git push -f origin "$BRANCH"
           PR_URL=$(gh pr create \
             --title "🤖 ${ISSUE_TITLE}" \
             --body "อัปเกรดอัตโนมัติจาก Issue #${ISSUE_NUM} (ผ่านการตรวจ Syntax แล้ว) กรุณาตรวจสอบและกด **Merge** เพื่อ Deploy ขึ้น Render" \
@@ -63,26 +63,32 @@ jobs:
           LINE_UID: ${{ secrets.LINE_USER_ID }}
           DISCORD_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          python -c '
+          python - << 'EOF'
           import os, requests
 
-          pr_url = os.getenv("PR_URL")
-          title = os.getenv("ISSUE_TITLE")
+          pr_url = os.getenv("PR_URL", "")
+          title = os.getenv("ISSUE_TITLE", "")
+          line_token = os.getenv("LINE_TOKEN", "")
+          line_uid = os.getenv("LINE_UID", "")
+          discord_url = os.getenv("DISCORD_URL", "")
+
           msg = (
               f"🛠️ AXION AI UPGRADE รออนุมัติ\n"
               f"รายการ: {title}\n"
-              f"สถานะ: เขียนโค้ด & เช็ก Syntax ผ่านแล้ว ✅\n"
+              f"สถานะ: เขียนโค้ด & เช็ค Syntax ผ่านแล้ว ✅\n"
               f"━━━━━━━━━━━━━━\n"
               f"👉 กดตรวจสอบและอนุมัติ (Merge):\n{pr_url}"
           )
 
-          if os.getenv("LINE_TOKEN") and os.getenv("LINE_UID"):
-              requests.post(
+          if line_token and line_uid:
+              res = requests.post(
                   "https://api.line.me/v2/bot/message/push",
-                  headers={"Authorization": f"Bearer {os.getenv(\"LINE_TOKEN\")}", "Content-Type": "application/json"},
-                  json={"to": os.getenv("LINE_UID"), "messages": [{"type": "text", "text": msg}]}
+                  headers={"Authorization": f"Bearer {line_token}", "Content-Type": "application/json"},
+                  json={"to": line_uid, "messages": [{"type": "text", "text": msg}]}
               )
+              print("LINE status:", res.status_code, res.text)
 
-          if os.getenv("DISCORD_URL"):
-              requests.post(os.getenv("DISCORD_URL"), json={"content": msg})
-          '
+          if discord_url:
+              res = requests.post(discord_url, json={"content": msg})
+              print("Discord status:", res.status_code)
+          EOF
