@@ -13,7 +13,7 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage
 # ==========================================
 # 1. การตั้งค่าหลัก & Environment Variables
 # ==========================================
-MODEL_VERSION = "1.5.1-universal-pro-myid"
+MODEL_VERSION = "1.5.2-issue-4"
 
 app = Flask(__name__)
 
@@ -409,6 +409,14 @@ if handler:
     def handle_message(event):
         text_lower = event.message.text.strip().lower()
 
+        # คำสั่งเช็คเวอร์ชันบอท
+        if text_lower == "/version":
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=f"Axion Quant Core เวอร์ชันปัจจุบันคือ: {MODEL_VERSION}")
+            )
+            return
+
         # คำสั่งดึง LINE User ID ส่วนตัว
         if text_lower == "myid":
             uid = getattr(event.source, "user_id", "ไม่พบ User ID")
@@ -464,6 +472,7 @@ if handler:
         if text_lower in ["/help", "help", "คำสั่ง"]:
             help_txt = (
                 "🤖 AXION QUANT CORE V1.5 UNIVERSAL\n"
+                "• /version — เช็คเวอร์ชันปัจจุบันของบอท\n"
                 "• myid — ดู LINE_USER_ID ของคุณ\n"
                 "• /scan — เช็กคะแนนทุกตัวพร้อมกัน\n"
                 "• /gold — เช็กทองคำ (XAUUSD)\n"
