@@ -13,13 +13,14 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage
 # ==========================================
 # 1. การตั้งค่าหลัก & Environment Variables
 # ==========================================
-MODEL_VERSION = "1.5.2-issue-4"
+MODEL_VERSION = "1.5.3-issue-8"
 
 app = Flask(__name__)
 
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
 LINE_USER_ID = os.getenv("LINE_USER_ID", "")          # User ID ส่วนตัว (ขึ้นต้นด้วย U...)
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 SCAN_INTERVAL_SEC = int(os.getenv("SCAN_INTERVAL_SEC", "900"))  # สแกนทุก 15 นาที (900 วินาที)
 
@@ -407,7 +408,88 @@ def callback():
 if handler:
     @handler.add(MessageEvent, message=TextMessage)
     def handle_message(event):
-        text_lower = event.message.text.strip().lower()
+        raw_text = event.message.text.strip()
+        text_lower = raw_text.lower()
+        sender_user_id = getattr(event.source, "user_id", "")
+        authorized_user_id = os.getenv("LINE_USER_ID", "")
+        github_token = os.getenv("GITHUB_TOKEN", "")
+
+        # 1. คำสั่งควบคุมระบบ /upgrade
+        if text_lower.startswith("/upgrade"):
+            if not authorized_user_id or sender_user_id != authorized_user_id:
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text="ปฏิเสธการเข้าถึง: คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้")
+                )
+                return
+
+            details = raw_text[len("/upgrade"):].strip()
+            if not details:
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text="กรุณาระบุรายละเอียด เช่น /upgrade เพิ่มฟังก์ชัน...")
+                )
+                return
+
+            url = "https://api.github.com/repos/totsaphol35/AI-bot/issues"
+            headers = {
+                "Authorization": f"Bearer {github_token}",
+                "Accept": "application/vnd.github+json"
+            }
+            payload = {
+                "title": "[UPGRADE] " + details[:60],
+                "body": details
+            }
+
+            try:
+                resp = requests.post(url, json=payload, headers=headers, timeout=15)
+                if resp.status_code == 201:
+                    issue_num = resp.json().get("number")
+                    reply_text = f"รับคำสั่งอัปเกรดแล้ว (Issue #{issue_num}) AI กำลังเขียนโค้ด รอรับแจ้งเตือนใน 1 นาทีครับ"
+                else:
+                    reply_text = f"เกิดข้อผิดพลาดในการสร้าง Issue (Status {resp.status_code}): {resp.text}"
+            except Exception as e:
+                reply_text = f"เกิดข้อผิดพลาดในการเชื่อมต่อ GitHub API: {e}"
+
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+            return
+
+        # 2. คำสั่งควบคุมระบบ /merge
+        if text_lower.startswith("/merge"):
+            if not authorized_user_id or sender_user_id != authorized_user_id:
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text="ปฏิเสธการเข้าถึง: คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้")
+                )
+                return
+
+            parts = raw_text.split()
+            if len(parts) < 2 or not parts[1].isdigit():
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text="กรุณาระบุเลข Pull Request เช่น /merge 6")
+                )
+                return
+
+            pr_number = parts[1]
+            url = f"https://api.github.com/repos/totsaphol35/AI-bot/pulls/{pr_number}/merge"
+            headers = {
+                "Authorization": f"Bearer {github_token}",
+                "Accept": "application/vnd.github+json"
+            }
+            payload = {"merge_method": "merge"}
+
+            try:
+                resp = requests.put(url, json=payload, headers=headers, timeout=15)
+                if resp.status_code == 200:
+                    reply_text = f"อนุมัติและ Merge PR #{pr_number} เรียบร้อยแล้ว Render กำลังอัปเดตบอทใน 1-2 นาทีครับ"
+                else:
+                    reply_text = f"เกิดข้อผิดพลาดในการ Merge PR #{pr_number} (Status {resp.status_code}): {resp.text}"
+            except Exception as e:
+                reply_text = f"เกิดข้อผิดพลาดในการเชื่อมต่อ GitHub API: {e}"
+
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+            return
 
         # คำสั่งเช็คเวอร์ชันบอท
         if text_lower == "/version":
@@ -478,7 +560,9 @@ if handler:
                 "• /gold — เช็กทองคำ (XAUUSD)\n"
                 "• /btc — เช็กบิทคอยน์ (BTCUSD)\n"
                 "• /eur — เช็ก EUR/USD\n"
-                "• /jpy — เช็ก USD/JPY"
+                "• /jpy — เช็ก USD/JPY\n"
+                "• /upgrade <รายละเอียด> — สั่ง AI อัปเกรดระบบ (เฉพาะเจ้าของ)\n"
+                "• /merge <เลข_PR> — อนุมัติ Merge PR (เฉพาะเจ้าของ)"
             )
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=help_txt))
 
