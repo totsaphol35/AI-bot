@@ -25,9 +25,14 @@ prompt = (
     f"{current_code}\n\n"
     f"กฎเหล็ก:\n"
     f"1. แก้ไขโค้ดตามคำสั่งให้สมบูรณ์ โดยรักษาฟีเจอร์เดิมทั้งหมดไว้\n"
-    f"2. อัปเดตตัวแปร MODEL_VERSION ด้านบนสุดให้มีรหัสเวอร์ชันใหม่และอ้างอิง Issue #{ISSUE_NUM} (เช่น 1.5.2-issue-{ISSUE_NUM})\n"
-    f"3. ตอบกลับมาเป็นโค้ด Python ฉบับเต็มของไฟล์ {TARGET_FILE} เท่านั้น ห้ามมีคำอธิบายอื่นปน\n"
-    f"4. ห้ามใส่เครื่องหมาย Markdown code block ครอบโค้ด\n"
+    f"2. อัปเดตตัวแปร MODEL_VERSION ด้านบนสุดให้มีรหัสเวอร์ชันใหม่และอ้างอิง Issue #{ISSUE_NUM}\n"
+    f"3. ตอบกลับตามรูปแบบด้านล่างนี้เป๊ะๆ เท่านั้น:\n"
+    f"ส่วนที่ 1: สรุปภาษาไทยแบบกระชับ อ่านง่าย ระบุ 3 หัวข้อ:\n"
+    f"- จุดที่เปลี่ยน: (ระบุฟังก์ชันหรือส่วนที่เพิ่ม/แก้)\n"
+    f"- ส่วนอื่นที่กระทบ: (ระบุส่วนอื่นของระบบที่มีการเปลี่ยนแปลง หรือระบุว่าไม่มี)\n"
+    f"- เหตุผล: (อธิบายสั้นๆ ว่าทำไมต้องแก้ตรงนี้)\n"
+    f"จากนั้นขึ้นบรรทัดใหม่แล้วพิมพ์คำว่า ===CODE_START===\n"
+    f"ส่วนที่ 2: โค้ด Python ฉบับเต็มของไฟล์ {TARGET_FILE} ห้ามใส่เครื่องหมาย Markdown code block ครอบโค้ด\n"
 )
 
 url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={GEMINI_API_KEY}"
@@ -41,7 +46,15 @@ if not res.ok:
     print(f"Gemini API Error ({res.status_code}): {res.text}")
     sys.exit(1)
 
-new_code = res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+raw_text = res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+if "===CODE_START===" in raw_text:
+    summary_text, new_code = raw_text.split("===CODE_START===", 1)
+    summary_text = summary_text.strip()
+    new_code = new_code.strip()
+else:
+    summary_text = "- จุดที่เปลี่ยน: อัปเดตโค้ดใน app.py ตามคำสั่ง\n- ส่วนอื่นที่กระทบ: ไม่มี\n- เหตุผล: ดำเนินการตาม Issue"
+    new_code = raw_text
 
 ticks = chr(96) * 3
 if new_code.startswith(ticks):
@@ -59,7 +72,9 @@ with open(temp_file, "w", encoding="utf-8") as f:
 try:
     py_compile.compile(temp_file, doraise=True)
     os.replace(temp_file, TARGET_FILE)
-    print("Syntax check passed! Updated app.py successfully.")
+    with open("upgrade_summary.txt", "w", encoding="utf-8") as sf:
+        sf.write(summary_text)
+    print("Syntax check passed! Updated app.py and saved upgrade_summary.txt.")
 except py_compile.PyCompileError as e:
     print(f"Syntax Error detected! Aborting upgrade:\n{e}")
     os.remove(temp_file)
