@@ -1,4 +1,4 @@
-hi import os
+import os
 import sys
 import py_compile
 import requests
