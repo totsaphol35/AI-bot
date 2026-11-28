@@ -1,4 +1,4 @@
-import os
+hi import os
 import sys
 import py_compile
 import requests
@@ -30,7 +30,7 @@ prompt = (
     f"4. ห้ามใส่เครื่องหมาย Markdown code block ครอบโค้ด\n"
 )
 
-url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={GEMINI_API_KEY}"
 payload = {
     "contents": [{"parts": [{"text": prompt}]}],
     "generationConfig": {"temperature": 0.2}
