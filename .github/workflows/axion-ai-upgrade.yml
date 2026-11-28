@@ -50,14 +50,17 @@ jobs:
           git push -f origin "$BRANCH"
           PR_URL=$(gh pr create \
             --title "🤖 ${ISSUE_TITLE}" \
-            --body "อัปเกรดอัตโนมัติจาก Issue #${ISSUE_NUM} (ผ่านการตรวจ Syntax แล้ว) กรุณาตรวจสอบและกด **Merge** เพื่อ Deploy ขึ้น Render" \
+            --body "อัปเกรดอัตโนมัติจาก Issue #${ISSUE_NUM} (ผ่านการตรวจ Syntax แล้ว)" \
             --base main \
             --head "$BRANCH")
+          PR_NUM=$(basename "$PR_URL")
           echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+          echo "pr_num=$PR_NUM" >> $GITHUB_OUTPUT
 
       - name: Notify LINE & Discord for Approval
         env:
           PR_URL: ${{ steps.create_pr.outputs.pr_url }}
+          PR_NUM: ${{ steps.create_pr.outputs.pr_num }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           LINE_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_UID: ${{ secrets.LINE_USER_ID }}
@@ -67,18 +70,28 @@ jobs:
           import os, requests
 
           pr_url = os.getenv("PR_URL", "")
+          pr_num = os.getenv("PR_NUM", "")
           title = os.getenv("ISSUE_TITLE", "")
           line_token = os.getenv("LINE_TOKEN", "")
           line_uid = os.getenv("LINE_UID", "")
           discord_url = os.getenv("DISCORD_URL", "")
 
+          summary = ""
+          if os.path.exists("upgrade_summary.txt"):
+              with open("upgrade_summary.txt", "r", encoding="utf-8") as f:
+                  summary = f.read().strip()
+
           msg = (
-              f"🛠️ AXION AI UPGRADE รออนุมัติ\n"
+              f"🛠️ AXION AI UPGRADE รออนุมัติ (PR #{pr_num})\n"
               f"รายการ: {title}\n"
-              f"สถานะ: เขียนโค้ด & เช็ค Syntax ผ่านแล้ว ✅\n"
+              f"สถานะ: เช็ค Syntax ผ่านแล้ว ✅\n"
               f"━━━━━━━━━━━━━━\n"
-              f"👉 กดตรวจสอบและอนุมัติ (Merge):\n{pr_url}"
-          )
+              f"{summary}\n"
+              f"━━━━━━━━━━━━━━\n"
+              f"👉 พิมพ์คำสั่งนี้ในแชทเพื่ออนุมัติทันที:\n"
+              f"/merge {pr_num}\n\n"
+              f"🔎 ดูโค้ดเต็ม:\n{pr_url}"
+          )[:4800]
 
           if line_token and line_uid:
               res = requests.post(
@@ -89,6 +102,6 @@ jobs:
               print("LINE status:", res.status_code, res.text)
 
           if discord_url:
-              res = requests.post(discord_url, json={"content": msg})
+              res = requests.post(discord_url, json={"content": msg[:1900]})
               print("Discord status:", res.status_code)
           EOF
